@@ -917,6 +917,10 @@ export interface MirrorBridge {
    *  Claude is currently doing (active generation / open prompt). No-op for
    *  spawn-mode attachments (no live TTY to interrupt). */
   interruptPane: (target: string) => Promise<{ ok: boolean; reason?: string }>;
+  /** Cycle the mirrored pane's permission mode to "auto" via Shift+Tab, reading
+   *  the TUI footer to land precisely. `already` = was already auto. Only works
+   *  on a session consuming keys; a wedged one won't react (use /escape). */
+  setAutoMode: (target: string) => Promise<{ ok: boolean; reason?: string; already?: boolean }>;
   /** Cwd lifecycle for the chat-bound project path. `getCwd` returns
    *  `{ runningCwd, pendingCwd, defaultCwd }` so /pwd can render all three
    *  truthfully. `setPendingCwd` writes the user-requested next cwd into the
@@ -2018,6 +2022,52 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       if (r.code !== 0) return { ok: false, reason: `send-keys Escape failed: ${r.stdout.slice(-200) || r.code}` };
       log.info({ target, sessionId: a.sessionId, pane: a.tmuxPane }, "mirror /stop — Esc sent to pane");
       return { ok: true };
+    },
+    // Cycle the mirrored pane's permission mode to "auto" via Shift+Tab (tmux
+    // `BTab`). Reads the TUI footer to learn the current mode, computes how many
+    // BTab presses reach auto, presses, re-reads to confirm. Cycle (tested
+    // 2026-06-25): default → accept edits → plan → auto → default. Only works on
+    // a session consuming keys; a wedged one won't react (use /escape).
+    //
+    // CRITICAL: capture-pane returns the WHOLE screen, including the conversation
+    // transcript — which, in a session that's been *discussing* these very modes,
+    // contains literal "auto mode on"/"plan mode on" strings. Matching those as if
+    // they were the footer is the bug that made /auto always report "already auto".
+    // Fix: the real footer is the LAST line carrying "(shift+tab to cycle)"; we
+    // extract the mode ONLY from that line. default's footer ("? for shortcuts")
+    // has no cycle suffix, so "no cycle line found" ⇒ treat as default.
+    setAutoMode: async (target) => {
+      const a = byTarget.get(target);
+      if (!a) return { ok: false, reason: "no mirror attached for target" };
+      if (!a.tmuxPane) return { ok: false, reason: "no live tmux pane (spawn-mode attachment)" };
+      const pane = a.tmuxPane;
+      if (!(await tmuxPaneAlive(pane))) return { ok: false, reason: "tmux pane no longer alive" };
+      // Steps-to-auto for each mode in the forward Shift+Tab cycle.
+      const STEPS: Record<string, number> = { default: 3, accept: 2, plan: 1, auto: 0 };
+      const readMode = async (): Promise<keyof typeof STEPS> => {
+        const r = await tmuxRun(["capture-pane", "-t", pane, "-p", "-S", "-12"]);
+        // Only the actual footer carries "(shift+tab to cycle)"; take the LAST
+        // such line so transcript text mentioning the phrase can't poison us.
+        const footer = r.stdout.split("\n").filter((l) => l.includes("shift+tab to cycle")).pop() ?? "";
+        if (/auto mode on/.test(footer)) return "auto";
+        if (/plan mode on/.test(footer)) return "plan";
+        if (/accept edits on/.test(footer)) return "accept";
+        // No cycle-footer line → default mode (its footer "? for shortcuts" has
+        // no cycle suffix). Per user decision: treat not-found as default.
+        return "default";
+      };
+      // Clear any transient popup first so the footer reflects a real mode.
+      await tmuxRun(["send-keys", "-t", pane, "Escape"]);
+      await sleepMs(300);
+      const mode = await readMode();
+      if (mode === "auto") return { ok: true, already: true };
+      for (let i = 0; i < STEPS[mode]!; i++) {
+        await tmuxRun(["send-keys", "-t", pane, "BTab"]);
+        await sleepMs(250);
+      }
+      const after = await readMode();
+      log.info({ target, sessionId: a.sessionId, pane, from: mode, after }, "mirror /auto — cycled permission mode");
+      return after === "auto" ? { ok: true } : { ok: false, reason: `切换后停在 ${after},未到 auto` };
     },
     getCwd,
     setPendingCwd,

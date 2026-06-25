@@ -86,6 +86,18 @@ const matchSession = (sessions: SessionInfo[], arg: string): SessionInfo | undef
   sessions.find((s) => s.sessionId === arg) ??
   (arg.length >= 6 ? sessions.find((s) => s.sessionId.startsWith(arg)) : undefined);
 
+// /escape — one-shot "get me out of a stuck session". Like /sessions but picks
+// the destination automatically: switch to the most-recently-active OTHER live
+// session, or spawn a fresh one if none exists. Handled entirely in the daemon
+// (never injected into the mirrored session), so it works even when the current
+// session is wedged — this is the whole point.
+const isEscapeCommand = (text: string): boolean => text.trim() === "/escape";
+
+// /auto — switch THIS chat's currently-mirrored (live) session into auto
+// permission mode via the bridge's Shift+Tab cycler. Daemon-handled; only works
+// on a session that's consuming keys (a wedged one won't react — use /escape).
+const isAutoCommand = (text: string): boolean => text.trim() === "/auto";
+
 // Strip any "@<botname>" mention (leading, mid-text, or trailing) so it doesn't
 // leak into claude's prompt. WeCom may place the mention anywhere depending on
 // where the user typed it.
@@ -358,6 +370,55 @@ export const installInboundRouter = (
       const reply = att.ok
         ? `✅ 已切到 ${hit.label} \`${hit.sessionId.slice(0, 8)}\` (${hit.cwd})`
         : `[weclaude] 切换失败: ${att.reason ?? "unknown"}`;
+      try { await client.replyStream(frame, msg.msgid, reply, true); } catch { /* ignore */ }
+      return { stop: true, who };
+    }
+    // /escape — one-shot逃生. Daemon-handled (never injected into the mirrored
+    // session), so it works even when the current session is wedged. Switch to
+    // the most-recently-active OTHER live session; if none, spawn a fresh one.
+    if (isEscapeCommand(text)) {
+      if (!("attach" in bridge)) {
+        try { await client.replyStream(frame, msg.msgid, "[weclaude] /escape only available in mirror mode", true); } catch { /* ignore */ }
+        return { stop: true, who };
+      }
+      let sessions: SessionInfo[] = [];
+      try { sessions = await scanClaudeSessions(); } catch (e) { log.error({ err: (e as Error).message }, "/escape scan failed"); }
+      const currentSid = bridge.status().mirrors.find((mm) => mm.target === who)?.sessionId ?? "";
+      // Candidates: every live session except the one we're stuck on, newest first.
+      const candidate = sessions
+        .filter((s) => s.sessionId !== currentSid)
+        .sort((x, y) => y.lastActivity - x.lastActivity)[0];
+      if (candidate) {
+        const att = bridge.attach({ sessionId: candidate.sessionId, jsonlPath: candidate.jsonlPath, target: who, tmuxPane: candidate.tmuxPane, tmuxSession: candidate.tmuxSession, cwd: candidate.cwd });
+        const reply = att.ok
+          ? `✅ 已逃生切到 ${candidate.label || "▫️"} \`${candidate.sessionId.slice(0, 8)}\` (${candidate.cwd})`
+          : `[weclaude] 逃生切换失败: ${att.reason ?? "unknown"}`;
+        try { await client.replyStream(frame, msg.msgid, reply, true); } catch { /* ignore */ }
+        return { stop: true, who };
+      }
+      // No other live session — spawn a fresh one (born auto via extraArgs).
+      if (!("newSession" in bridge)) {
+        try { await client.replyStream(frame, msg.msgid, "[weclaude] 无其它可用会话,且当前 bridge 不支持新建", true); } catch { /* ignore */ }
+        return { stop: true, who };
+      }
+      const r = await bridge.newSession(who, who);
+      const reply = r.ok
+        ? `✅ 无其它可用会话,已新建 \`${(r.sessionId ?? "").slice(0, 8)}\` 并切过去`
+        : `[weclaude] 逃生新建失败: ${r.reason ?? "unknown"}`;
+      try { await client.replyStream(frame, msg.msgid, reply, true); } catch { /* ignore */ }
+      return { stop: true, who };
+    }
+    // /auto — switch the currently-mirrored live session into auto permission
+    // mode via Shift+Tab cycling (bridge reads the TUI footer to land exactly).
+    if (isAutoCommand(text)) {
+      if (!("setAutoMode" in bridge)) {
+        try { await client.replyStream(frame, msg.msgid, "[weclaude] /auto only available in mirror mode", true); } catch { /* ignore */ }
+        return { stop: true, who };
+      }
+      const r = await bridge.setAutoMode(who);
+      const reply = r.ok
+        ? (r.already ? "[weclaude] 当前已是 auto mode" : "✅ 已切到 auto mode")
+        : `[weclaude] /auto 失败: ${r.reason ?? "unknown"}。若会话卡死,试试 /escape`;
       try { await client.replyStream(frame, msg.msgid, reply, true); } catch { /* ignore */ }
       return { stop: true, who };
     }
