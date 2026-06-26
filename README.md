@@ -112,6 +112,17 @@ chmod +x ~/.weclaude/daemonctl.sh
 
 镜像模式下，IM 里发 `/new` 直接开新 tmux 窗口 + 新 Claude 会话；`/clear` 清当前上下文；带图消息自动注入剪贴板。所有 IM 聊天共享一个 tmux session（默认名 `weclaude`），每个聊天一个独立 window，重启 daemon、关 tmux 都能自愈。
 
+**IM 斜杠命令**（镜像模式，全部由 daemon 直接处理、**永不注入被镜像的会话**——所以即便当前会话卡死也照常生效）：
+
+| 命令 | 作用 |
+| --- | --- |
+| `/sessions` | 列出本机所有在跑的 Claude 会话（带摘要 + 稳定动物 emoji 标签），标出当前镜像的那个 |
+| `/sessions <emoji 或 id>` | 把本聊天的镜像切到指定会话（支持动物 emoji、完整 sessionId、或 ≥6 字符前缀） |
+| `/escape` | 一键逃生：切到最近活跃的**其它**会话；没有则新开一个（新会话天生 auto 模式） |
+| `/auto` | 把当前镜像的会话切到 auto 权限模式（经 Shift+Tab 循环，读 TUI footer 精确落位；卡死的会话切不动，用 `/escape`） |
+
+> 💡 IM 输入法常在 emoji / 命令后插入零宽字符（word-joiner、变体选择符等），weclaude 会在匹配前统一剥离，所以手机上发 `/sessions 🐼` 不会因为看不见的尾巴而匹配失败。
+
 > 💡 **mirror 不要求你必须先在 CLI 里开 tmux**：在企业微信里直接发 `/new` 就能从零起一个新 tmux 窗口 + Claude 会话；甚至首次发任意消息都会自动 spawn + 绑定（首条消息既是绑定信号也是第一句 prompt）。回家打开终端 `tmux attach -t weclaude` 接管即可。
 
 ---
@@ -288,6 +299,10 @@ weclaude uninstall           # 完整卸载（先于 npm uninstall）
 daemon 是**唯一**持有 WeCom WS 连接的进程，hook 和 MCP 都是它的薄 HTTP 客户端。
 
 详情看 [CLAUDE.md](CLAUDE.md)。
+
+## Contributors
+
+- zhenwwang <zwwang96@gmail.com>
 
 ## License
 

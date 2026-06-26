@@ -49,18 +49,30 @@ const renderIds = (msg: BaseMessage, cfg: Config): string => {
   ].join("\n");
 };
 
-const isIdCommand = (text: string): boolean => text.trim() === "/id";
-const isPwdCommand = (text: string): boolean => text.trim() === "/pwd";
-const isNewCommand = (text: string): boolean => text.trim() === "/new";
-const isStopCommand = (text: string): boolean => text.trim() === "/stop";
+// IMEs (esp. mobile WeCom) sprinkle invisible format chars around emoji and at
+// message ends — a word-joiner U+2060 after 🐼, a zero-width space, a BOM. They
+// survive .trim() (not whitespace), so "/auto⁠" !== "/auto" and "🐼⁠" !== "🐼",
+// silently breaking every exact-match command. Strip the whole Unicode format
+// category (\p{Cf}: ZWSP/ZWNJ/ZWJ/WJ/BOM/…) before comparing. Animal labels are
+// plain single-codepoint emoji, so this can't eat them.
+const stripInvisibles = (s: string): string => s.replace(/\p{Cf}/gu, "");
+// Canonicalize a slash-command line for exact matching: drop invisibles, trim.
+const cmd = (text: string): string => stripInvisibles(text).trim();
+
+const isIdCommand = (text: string): boolean => cmd(text) === "/id";
+const isPwdCommand = (text: string): boolean => cmd(text) === "/pwd";
+const isNewCommand = (text: string): boolean => cmd(text) === "/new";
+const isStopCommand = (text: string): boolean => cmd(text) === "/stop";
 
 // /session(s) [arg] — list live Claude sessions, or switch the mirror to one.
 // Bare "/sessions" (or "/session") lists; an arg (animal emoji, sessionId, or
 // sessionId prefix) switches. Tolerates an optional trailing "s" and any spacing.
+// stripInvisibles drops IME-injected \p{Cf} chars (see cmd() above) so an arg
+// like "🐼⁠" / "92b3534b⁠" still matches.
 const parseSessionsCommand = (text: string): { arg: string } | undefined => {
-  const m = /^\/sessions?(?:\s+(.+))?$/u.exec(text.trim());
+  const m = /^\/sessions?(?:\s+(.+))?$/u.exec(stripInvisibles(text).trim());
   if (!m) return undefined;
-  return { arg: (m[1] ?? "").trim() };
+  return { arg: stripInvisibles(m[1] ?? "").trim() };
 };
 
 // Render the scanned session list into a WeCom-friendly markdown block. The
@@ -91,12 +103,12 @@ const matchSession = (sessions: SessionInfo[], arg: string): SessionInfo | undef
 // session, or spawn a fresh one if none exists. Handled entirely in the daemon
 // (never injected into the mirrored session), so it works even when the current
 // session is wedged — this is the whole point.
-const isEscapeCommand = (text: string): boolean => text.trim() === "/escape";
+const isEscapeCommand = (text: string): boolean => cmd(text) === "/escape";
 
 // /auto — switch THIS chat's currently-mirrored (live) session into auto
 // permission mode via the bridge's Shift+Tab cycler. Daemon-handled; only works
 // on a session that's consuming keys (a wedged one won't react — use /escape).
-const isAutoCommand = (text: string): boolean => text.trim() === "/auto";
+const isAutoCommand = (text: string): boolean => cmd(text) === "/auto";
 
 // Strip any "@<botname>" mention (leading, mid-text, or trailing) so it doesn't
 // leak into claude's prompt. WeCom may place the mention anywhere depending on
