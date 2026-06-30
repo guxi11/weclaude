@@ -2032,10 +2032,16 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // CRITICAL: capture-pane returns the WHOLE screen, including the conversation
     // transcript — which, in a session that's been *discussing* these very modes,
     // contains literal "auto mode on"/"plan mode on" strings. Matching those as if
-    // they were the footer is the bug that made /auto always report "already auto".
-    // Fix: the real footer is the LAST line carrying "(shift+tab to cycle)"; we
-    // extract the mode ONLY from that line. default's footer ("? for shortcuts")
-    // has no cycle suffix, so "no cycle line found" ⇒ treat as default.
+    // they were the footer made /auto always report "already auto".
+    // Equally critical: the footer's hint SUFFIX is not stable — at an idle prompt
+    // it reads "(shift+tab to cycle)", but with a tasks/agents panel open it becomes
+    // "ctrl+t to hide tasks · ← for agents · ⇆ to manage" with NO cycle phrase. So
+    // keying off "shift+tab to cycle" misses those states and falls through to
+    // default (→ 3 BTab from a plan-mode session, overshooting auto).
+    // Fix: match the mode PHRASE itself ("auto mode on"/…) and take the LAST line
+    // that carries one — the footer is always the bottom-most UI line, so the last
+    // occurrence is the footer even when the transcript mentions a mode above it.
+    // No mode phrase found ⇒ default (its footer "? for shortcuts" has none).
     setAutoMode: async (target) => {
       const a = byTarget.get(target);
       if (!a) return { ok: false, reason: "no mirror attached for target" };
@@ -2045,15 +2051,27 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // Steps-to-auto for each mode in the forward Shift+Tab cycle.
       const STEPS: Record<string, number> = { default: 3, accept: 2, plan: 1, auto: 0 };
       const readMode = async (): Promise<keyof typeof STEPS> => {
-        const r = await tmuxRun(["capture-pane", "-t", pane, "-p", "-S", "-12"]);
-        // Only the actual footer carries "(shift+tab to cycle)"; take the LAST
-        // such line so transcript text mentioning the phrase can't poison us.
-        const footer = r.stdout.split("\n").filter((l) => l.includes("shift+tab to cycle")).pop() ?? "";
-        if (/auto mode on/.test(footer)) return "auto";
-        if (/plan mode on/.test(footer)) return "plan";
-        if (/accept edits on/.test(footer)) return "accept";
-        // No cycle-footer line → default mode (its footer "? for shortcuts" has
-        // no cycle suffix). Per user decision: treat not-found as default.
+        const r = await tmuxRun(["capture-pane", "-t", pane, "-p", "-S", "-20"]);
+        // The mode footer lives in the chrome region BELOW the input box's bottom
+        // separator rule (a line of "─"). Layout, bottom-up:
+        //   ─────────   ← bottom separator rule
+        //   ⏵⏵ auto mode on · 4 shells · ctrl+t to hide tasks · …   ← the footer
+        //   …            new task? /clear to save 93%               ← context hint
+        // Two traps this avoids:
+        //   1. the footer is NOT the last line — a context-usage hint can sit
+        //      below it (taking the last line read that hint → "default" → the
+        //      "plan mode → 3 BTab" overshoot bug).
+        //   2. the hint suffix is unstable (tasks/agents panel drops
+        //      "(shift+tab to cycle)") — so we match the mode PHRASE, not the hint.
+        // Restricting to lines below the last separator rule also excludes the
+        // transcript (which is above the input box) from polluting the match.
+        const all = r.stdout.split("\n");
+        const lastRule = all.map((l) => /^\s*─{6,}\s*$/.test(l)).lastIndexOf(true);
+        const region = (lastRule >= 0 ? all.slice(lastRule + 1) : all).join("\n");
+        if (/auto mode on/.test(region)) return "auto";
+        if (/plan mode on/.test(region)) return "plan";
+        if (/accept edits on/.test(region)) return "accept";
+        // No mode phrase below the rule ⇒ default ("? for shortcuts").
         return "default";
       };
       // Clear any transient popup first so the footer reflects a real mode.
