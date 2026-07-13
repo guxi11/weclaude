@@ -12,6 +12,11 @@ export interface PendingMeta {
   cwd?: string;
   sessionId?: string;
   transcriptTail?: string;
+  // For AskUserQuestion cards: which question in tool_input.questions THIS card
+  // renders. AskUserQuestion may carry several questions but a vote card holds
+  // only one, so we push one card per question — each pending records its index
+  // so the resolved-card renderer picks the right question (not always [0]).
+  askqQuestionIndex?: number;
 }
 
 interface Pending {

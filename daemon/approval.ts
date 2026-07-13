@@ -727,75 +727,96 @@ interface AskqHandleArgs {
 
 const handleAskUserQuestion = async ({ cfg, log, client, body, getMirrorTarget }: AskqHandleArgs): Promise<ApproveResp> => {
   const questions = parseAskqInput(body.tool_input);
+  // Diagnostic: every AskUserQuestion that ends up in the CLI (any `ask` return
+  // below) leaves NO other trace, so log the shape up front — this is how we
+  // tell "multi-question dropped" from "unparsable" from "no approver".
+  log.info(
+    { sessionId: body.session_id, qCount: questions?.length ?? 0, cwd: body.cwd },
+    "askq received",
+  );
   if (!questions || questions.length === 0) return { decision: "ask", reason: "askq_unparsable" };
-  if (questions.length > 1) return { decision: "ask", reason: "askq_multi_unsupported" };
-  const q = questions[0]!;
-  if (q.options.length === 0) return { decision: "ask", reason: "askq_no_options" };
+  if (questions.some((q) => q.options.length === 0)) return { decision: "ask", reason: "askq_no_options" };
 
   const approver = resolveApprover(cfg, body.session_id, getMirrorTarget);
   if (!approver) return { decision: "ask", reason: "no_approver" };
   if (!client.isConnected) return { decision: "ask", reason: "ws_disconnected" };
 
   const longPollMs = cfg.approval.longPollSec * 1000;
-  // toolInput 存原始 input,事件 listener 通过 getPending 重解析。
-  // transcriptTail 一并存进 meta, resolved 卡渲染时复用同一份 source。
-  const { reqId, promise } = createPending({
-    meta: {
-      kind: "generic",
-      createdAt: Date.now(),
-      toolName: "AskUserQuestion",
-      toolInput: body.tool_input,
-      cwd: body.cwd,
-      sessionId: body.session_id,
-      transcriptTail: body.transcript_tail ?? "",
-    },
-    timeoutMs: longPollMs,
-  });
+  const target = targetChatId(approver);
+  const multi = questions.length > 1;
 
-  try {
-    const target = targetChatId(approver);
-    // 先发 markdown 列出题目+ABCD 选项 (vote 卡不支持正文字段),
-    // 失败不阻断,卡片仍按字母编号显示。
-    try {
-      await client.sendMessage(target, {
-        msgtype: "markdown",
-        markdown: { content: buildAskqMarkdown(q) },
-      });
-    } catch (e) {
-      log.warn({ err: (e as Error).message }, "askq markdown prelude send failed");
-    }
-    await client.sendMessage(target, {
-      msgtype: "template_card",
-      template_card: buildAskqCard(reqId, q, body.transcript_tail ?? ""),
+  // A vote card holds ONE question, but AskUserQuestion may pose several. Push
+  // one card per question, serially: ask, wait for the click, then move on.
+  // Any question answered "去 CLI" aborts the whole tool call to the local CLI
+  // (a partial WeCom answer + partial CLI answer can't be recombined). All
+  // answers are gathered and injected back in one deny+reason.
+  const answers: string[] = [];
+  for (let qi = 0; qi < questions.length; qi++) {
+    const q = questions[qi]!;
+    // toolInput 存原始 input,事件 listener 通过 getPending + askqQuestionIndex
+    // 重解析出这一题。transcriptTail 一并存进 meta, resolved 卡渲染复用同一份。
+    const { reqId, promise } = createPending({
+      meta: {
+        kind: "generic",
+        createdAt: Date.now(),
+        toolName: "AskUserQuestion",
+        toolInput: body.tool_input,
+        cwd: body.cwd,
+        sessionId: body.session_id,
+        transcriptTail: body.transcript_tail ?? "",
+        askqQuestionIndex: qi,
+      },
+      timeoutMs: longPollMs,
     });
-    log.info({ reqId, approver }, "askq card sent");
-  } catch (e) {
-    log.error({ err: (e as Error).message }, "askq send failed");
-    resolvePending(reqId, "deny"); // 释放 pending 槽
-    return { decision: "ask", reason: `askq_send_fail:${(e as Error).message}` };
-  }
 
-  let raw: string;
-  try {
-    raw = (await promise) as unknown as string;
-  } catch {
-    return { decision: "ask", reason: "askq_timeout" };
-  }
+    try {
+      // 先发 markdown 列出题目+ABCD 选项 (vote 卡不支持正文字段),
+      // 失败不阻断,卡片仍按字母编号显示。多题时前缀 "（第 n/N 题）"。
+      const prefix = multi ? `**（第 ${qi + 1}/${questions.length} 题）**\n` : "";
+      try {
+        await client.sendMessage(target, {
+          msgtype: "markdown",
+          markdown: { content: prefix + buildAskqMarkdown(q) },
+        });
+      } catch (e) {
+        log.warn({ err: (e as Error).message }, "askq markdown prelude send failed");
+      }
+      await client.sendMessage(target, {
+        msgtype: "template_card",
+        template_card: buildAskqCard(reqId, q, body.transcript_tail ?? ""),
+      });
+      log.info({ reqId, approver, qi, qCount: questions.length }, "askq card sent");
+    } catch (e) {
+      log.error({ err: (e as Error).message }, "askq send failed");
+      resolvePending(reqId, "deny"); // 释放 pending 槽
+      return { decision: "ask", reason: `askq_send_fail:${(e as Error).message}` };
+    }
 
-  if (raw === "cli") return { decision: "ask", reason: "askq_cli" };
-  if (raw.startsWith(ASKQ_PICKED_PREFIX)) {
+    let raw: string;
+    try {
+      raw = (await promise) as unknown as string;
+    } catch {
+      return { decision: "ask", reason: "askq_timeout" };
+    }
+
+    if (raw === "cli") return { decision: "ask", reason: "askq_cli" };
+    if (!raw.startsWith(ASKQ_PICKED_PREFIX)) return { decision: "ask", reason: "askq_unknown" };
     const idxs = raw.slice(ASKQ_PICKED_PREFIX.length)
       .split(",")
       .map((s) => parseInt(s, 10))
       .filter((n) => Number.isInteger(n) && n >= 0 && n < q.options.length);
     if (idxs.length === 0) return { decision: "ask", reason: "askq_empty_pick" };
     const labels = idxs.map((i) => q.options[i]!.label).join(", ");
-    return {
-      decision: "deny",
-      reason: `User answered "${q.header || q.question}" via WeCom: ${labels}`,
-    };
+    answers.push(`"${q.header || q.question}": ${labels}`);
   }
-  return { decision: "ask", reason: "askq_unknown" };
+
+  // All questions answered via WeCom — inject the combined result back so the
+  // model sees every answer at once (deny+reason is the AskUserQuestion→answer
+  // channel; the model reads reason as the user's choice).
+  return {
+    decision: "deny",
+    reason: `User answered via WeCom — ${answers.join("; ")}`,
+  };
 };
 
 // ── /approve handler ───────────────────────────────────────────────────
@@ -1150,7 +1171,10 @@ export const installApprovalEventListener = (
       const askq = decodeAskqKey(key);
       if (askq) {
         const meta = getPending(askq.reqId);
-        const q = parseAskqInput(meta?.toolInput)?.[0];
+        // A card renders ONE question; meta.askqQuestionIndex says which (multi-
+        // question AskUserQuestion pushes one card per question). Default 0 for
+        // single-question / legacy pendings.
+        const q = parseAskqInput(meta?.toolInput)?.[meta?.askqQuestionIndex ?? 0];
         // 实际 payload 是 XML→JSON 双层包装, 不能直接 [0].option_ids; 同时
         // 兼容 SDK 文档里那个扁平形态(以防固件升级)。
         const si = ev?.template_card_event?.selected_items;
