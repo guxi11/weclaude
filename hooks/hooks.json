@@ -7,7 +7,7 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/pre-tool-use.sh",
-            "timeout": 1810
+            "timeout": 7210
           }
         ]
       }

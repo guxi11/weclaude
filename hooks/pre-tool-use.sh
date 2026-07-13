@@ -4,7 +4,11 @@
 set -uo pipefail
 
 DAEMON_URL="${WECLAUDE_DAEMON_URL:-http://127.0.0.1:17890/approve}"
-HOOK_TIMEOUT="${WECLAUDE_HOOK_TIMEOUT:-1810}"
+# curl --max-time for the long-poll. MUST be ≥ daemon approval.longPollSec
+# (default 7200s) or the hook aborts while the daemon is still waiting on your
+# click — you'd get a local picker AND a stale WeCom card, and a late answer
+# would land on a dead request. 7210 mirrors approval.hookTimeoutSec.
+HOOK_TIMEOUT="${WECLAUDE_HOOK_TIMEOUT:-7210}"
 STATE_DIR="${WECLAUDE_STATE_DIR:-$HOME/.weclaude/state}"
 # Fallback policy when the daemon is unreachable / replies garbage. ask|allow|deny.
 # Default keeps the safe behavior; set to `allow` in trusted local-only setups.
