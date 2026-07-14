@@ -23,6 +23,7 @@ import type { MirrorStore } from "./mirror-store.js";
 import { spawnTmuxClaude } from "./spawn-tmux.js";
 import { recordTool, recordToolResult, buildDetailUrl } from "./detail.js";
 import { isAutoWindowActive, cacheGet, cacheKey } from "./session-cache.js";
+import { scanClaudeSessions } from "./session-scan.js";
 
 // Same PATH augmentation logic as cc-bridge: launchd / systemd start the daemon
 // with a stripped PATH that often lacks nvm / homebrew, breaking spawn(claudeBin).
@@ -2045,9 +2046,34 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     setAutoMode: async (target) => {
       const a = byTarget.get(target);
       if (!a) return { ok: false, reason: "no mirror attached for target" };
-      if (!a.tmuxPane) return { ok: false, reason: "no live tmux pane (spawn-mode attachment)" };
-      const pane = a.tmuxPane;
-      if (!(await tmuxPaneAlive(pane))) return { ok: false, reason: "tmux pane no longer alive" };
+      if (!a.sessionId) return { ok: false, reason: "no sessionId on attachment (spawn-mode)" };
+      // Resolve a LIVE pane. The stored pane id (`%N`) dies when the tmux server
+      // restarts, and it can also be stale after a session was discovered/switched.
+      // A dead pane used to be a hard failure ("pane no longer alive") even though
+      // the same claude session is often still alive in a different pane. Re-derive
+      // it from the process tree keyed on `--session-id` (scanClaudeSessions) —
+      // never by tmux session name, which would mis-route in the shared `weclaude`
+      // session (see restore-from-store note above).
+      let pane = a.tmuxPane;
+      if (!pane || !(await tmuxPaneAlive(pane))) {
+        const scanned = (await scanClaudeSessions()).find((s) => s.sessionId === a.sessionId);
+        if (scanned?.tmuxPane && (await tmuxPaneAlive(scanned.tmuxPane))) {
+          pane = scanned.tmuxPane;
+          a.tmuxPane = pane;
+          a.tmuxSession = scanned.tmuxSession || a.tmuxSession;
+          deps.store.set(target, {
+            sessionId: a.sessionId,
+            jsonlPath: a.jsonlPath,
+            tmuxSession: a.tmuxSession || undefined,
+            tmuxPane: a.tmuxPane || undefined,
+            cwd: a.runningCwd || undefined,
+            pendingCwd: a.pendingCwd || undefined,
+          });
+          log.info({ target, sessionId: a.sessionId, pane }, "mirror /auto — re-derived live pane for dead/stale attachment");
+        } else {
+          return { ok: false, reason: "tmux pane no longer alive (session not found in live scan)" };
+        }
+      }
       // Steps-to-auto for each mode in the forward Shift+Tab cycle.
       const STEPS: Record<string, number> = { default: 3, accept: 2, plan: 1, auto: 0 };
       const readMode = async (): Promise<keyof typeof STEPS> => {
@@ -2074,17 +2100,33 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // No mode phrase below the rule ⇒ default ("? for shortcuts").
         return "default";
       };
-      // Clear any transient popup first so the footer reflects a real mode.
-      await tmuxRun(["send-keys", "-t", pane, "Escape"]);
-      await sleepMs(300);
-      const mode = await readMode();
+      // Read the current mode WITHOUT touching the pane first. The old code sent
+      // an unconditional Escape "to clear popups" — but on a busy session whose
+      // footer reads "esc to interrupt", that Escape aborts the running task. And
+      // it fired even when already auto (STEPS=0), interrupting for nothing. BTab
+      // is a pure mode-cycle key and does not interrupt generation, so we only
+      // need Escape to dismiss a genuine transient popup — which shows up as an
+      // unreadable mode. Read first; bail early if already auto (no keys sent).
+      let mode = await readMode();
       if (mode === "auto") return { ok: true, already: true };
+      // A transient popup (e.g. a selection dialog) can hide the real footer and
+      // make readMode fall through to "default", overshooting the BTab count. If
+      // the pane is NOT busy-interruptible, dismiss it once and re-read. We detect
+      // "busy" by the interrupt hint so we never abort a running task.
+      const snap = await tmuxRun(["capture-pane", "-t", pane, "-p", "-S", "-20"]);
+      const busy = /esc to interrupt/.test(snap.stdout);
+      if (!busy) {
+        await tmuxRun(["send-keys", "-t", pane, "Escape"]);
+        await sleepMs(300);
+        mode = await readMode();
+        if (mode === "auto") return { ok: true, already: true };
+      }
       for (let i = 0; i < STEPS[mode]!; i++) {
         await tmuxRun(["send-keys", "-t", pane, "BTab"]);
         await sleepMs(250);
       }
       const after = await readMode();
-      log.info({ target, sessionId: a.sessionId, pane, from: mode, after }, "mirror /auto — cycled permission mode");
+      log.info({ target, sessionId: a.sessionId, pane, from: mode, after, busy }, "mirror /auto — cycled permission mode");
       return after === "auto" ? { ok: true } : { ok: false, reason: `切换后停在 ${after},未到 auto` };
     },
     getCwd,
