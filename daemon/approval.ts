@@ -648,9 +648,10 @@ interface PlanHandleArgs {
   client: WSClient;
   body: ApproveReq;
   getMirrorTarget?: (sessionId: string) => string | undefined;
+  setAutoModeForTarget?: (target: string) => Promise<{ ok: boolean; reason?: string; already?: boolean }>;
 }
 
-const handleExitPlanMode = async ({ cfg, log, client, body, getMirrorTarget }: PlanHandleArgs): Promise<ApproveResp> => {
+const handleExitPlanMode = async ({ cfg, log, client, body, getMirrorTarget, setAutoModeForTarget }: PlanHandleArgs): Promise<ApproveResp> => {
   const plan = parsePlanInput(body.tool_input);
   if (!plan) return { decision: "ask", reason: "plan_unparsable" };
 
@@ -701,6 +702,26 @@ const handleExitPlanMode = async ({ cfg, log, client, body, getMirrorTarget }: P
   }
 
   if (raw === `${PLAN_PICKED_PREFIX}approve`) {
+    // 同意后自动把该会话切到 auto 权限模式:计划刚批准、马上要连着跑一串工具,
+    // 不切的话用户得对每个 tool 再点授权卡,体验割裂。best-effort、fire-and-forget:
+    //   - 必须先让本 handler 返回 deny+reason(hook 正 park 在它上面)—— Claude 收到
+    //     后才退出 plan mode 开始执行, TUI footer 才从 plan 变成可切换态。所以延时
+    //     后再 setAutoMode(此刻直接切,pane 还在 plan picker 上,BTab 落点不准)。
+    //   - 失败只记 warn,绝不影响计划放行(CLAUDE.md: 错误不破坏工作流)。
+    //   - 仅 mirror 模式有 setAutoModeForTarget; headless 下为 undefined,跳过。
+    const target = body.session_id ? getMirrorTarget?.(body.session_id) : undefined;
+    if (target && setAutoModeForTarget) {
+      const doSwitch = setAutoModeForTarget;
+      setTimeout(() => {
+        doSwitch(target)
+          .then((r) =>
+            r.ok
+              ? log.info({ target, already: r.already }, "plan approved → auto mode set")
+              : log.warn({ target, reason: r.reason }, "plan approved → auto mode switch failed"),
+          )
+          .catch((e) => log.warn({ target, err: (e as Error).message }, "plan approved → auto mode threw"));
+      }, 2500);
+    }
     // 同意也走 deny+reason,而不是 allow:实测 allow 在非 auto-mode 会话里仍会弹
     // 本地 1/2/3 picker(plan 退出的 auto/manual 选择是 TUI 本地交互,PreToolUse
     // allow 替代不了)。deny 的 reason 直接回传 model 且不弹 picker,所以用一段
@@ -849,6 +870,10 @@ interface ApprovalDeps {
    *  instead of cfg.approval.approvers[0] / cfg.defaultChat — keeps the conversation and
    *  its approval prompts in the same WeCom chat. */
   getMirrorTarget?: (sessionId: string) => string | undefined;
+  /** Optional (mirror mode only): switch a target's mirrored session into auto
+   *  permission mode. Used to auto-enter auto mode right after a plan approval,
+   *  so the ensuing tool run doesn't card the user for every step. */
+  setAutoModeForTarget?: (target: string) => Promise<{ ok: boolean; reason?: string; already?: boolean }>;
 }
 
 const resolveApprover = (
@@ -860,7 +885,7 @@ const resolveApprover = (
   return mirror || pickApprover(cfg);
 };
 
-export const makeApproveHandler = ({ cfg, log, client, getMirrorTarget }: ApprovalDeps): Handler => {
+export const makeApproveHandler = ({ cfg, log, client, getMirrorTarget, setAutoModeForTarget }: ApprovalDeps): Handler => {
   const detailUrlFor = (id: string): string =>
     buildDetailUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, id);
 
@@ -970,6 +995,7 @@ export const makeApproveHandler = ({ cfg, log, client, getMirrorTarget }: Approv
         log,
         client,
         getMirrorTarget,
+        setAutoModeForTarget,
         body: {
           session_id: sessionId,
           tool_name: toolName,
