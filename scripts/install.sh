@@ -9,6 +9,22 @@ LABEL="com.weclaude.daemon"
 
 [[ -x "$NODE" ]] || { echo "node not found in PATH"; exit 1; }
 
+# jq is the PreToolUse hook's fast path for JSON. The hook now degrades to node
+# (a Claude Code hard dep) when jq is absent, so this is best-effort only — try
+# the common package managers, but never fail the install if none is available.
+if ! command -v jq >/dev/null 2>&1; then
+  echo "[install] jq not found — attempting install (hook falls back to node if this fails)"
+  if   command -v apt-get >/dev/null 2>&1; then (sudo apt-get install -y jq || apt-get install -y jq) >/dev/null 2>&1 || true
+  elif command -v dnf     >/dev/null 2>&1; then (sudo dnf install -y jq || dnf install -y jq) >/dev/null 2>&1 || true
+  elif command -v yum     >/dev/null 2>&1; then (sudo yum install -y jq || yum install -y jq) >/dev/null 2>&1 || true
+  elif command -v apk     >/dev/null 2>&1; then (sudo apk add jq || apk add jq) >/dev/null 2>&1 || true
+  elif command -v brew    >/dev/null 2>&1; then brew install jq >/dev/null 2>&1 || true
+  fi
+  command -v jq >/dev/null 2>&1 \
+    && echo "[install] jq installed" \
+    || echo "[install] jq still missing — hook will use node fallback (fine)"
+fi
+
 # Build if missing
 if [[ ! -f "$REPO/dist/daemon/index.js" ]]; then
   echo "[install] building..."
@@ -54,17 +70,31 @@ case "$OS" in
     fi
     ;;
   Linux)
-    UNIT_DIR="$HOME_DIR/.config/systemd/user"
-    mkdir -p "$UNIT_DIR"
-    UNIT_DST="$UNIT_DIR/weclaude.service"
-    sed \
-      -e "s|__NODE__|$NODE|g" \
-      -e "s|__REPO__|$REPO|g" \
-      -e "s|__HOME__|$HOME_DIR|g" \
-      "$REPO/systemd/weclaude.service.template" > "$UNIT_DST"
-    systemctl --user daemon-reload
-    systemctl --user enable --now weclaude.service
-    echo "[install] systemd unit enabled: $UNIT_DST"
+    # systemd --user needs a live user session bus. Containers (PID 1 not
+    # systemd, no XDG_RUNTIME_DIR) don't have one — `systemctl --user` then dies
+    # with "Failed to connect to bus". Detect that and fall back to a setsid
+    # restart-loop supervisor instead of aborting the whole install.
+    if systemctl --user show-environment >/dev/null 2>&1; then
+      UNIT_DIR="$HOME_DIR/.config/systemd/user"
+      mkdir -p "$UNIT_DIR"
+      UNIT_DST="$UNIT_DIR/weclaude.service"
+      sed \
+        -e "s|__NODE__|$NODE|g" \
+        -e "s|__REPO__|$REPO|g" \
+        -e "s|__HOME__|$HOME_DIR|g" \
+        "$REPO/systemd/weclaude.service.template" > "$UNIT_DST"
+      systemctl --user daemon-reload
+      systemctl --user enable --now weclaude.service
+      echo "[install] systemd unit enabled: $UNIT_DST"
+    else
+      echo "[install] no systemd --user session — using restart-loop supervisor" >&2
+      SUP="$HOME_DIR/.weclaude/daemonctl.sh"
+      mkdir -p "$HOME_DIR/.weclaude"
+      cp "$REPO/scripts/daemonctl.sh" "$SUP"
+      chmod +x "$SUP"
+      "$SUP" restart || true
+      echo "[install] daemon supervised via $SUP (add '$SUP start' to your shell profile / container entrypoint for reboot persistence)"
+    fi
     ;;
   *)
     echo "unsupported OS: $OS"; exit 1 ;;
