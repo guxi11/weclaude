@@ -9,6 +9,12 @@ const Bot = z.object({
   botId: z.string().min(1),
   secret: z.string().min(1),
   websocketUrl: z.string().url().default("wss://openws.work.weixin.qq.com"),
+  // Forward proxy for outbound egress (WeCom WebSocket + file download). Needed
+  // on internal-network hosts with no direct route to openws.work.weixin.qq.com.
+  // The `ws` lib does NOT honor HTTPS_PROXY env vars, so the WebSocket needs an
+  // explicit agent — env-only proxy setups leave wsConnected stuck false.
+  // Empty → fall back to HTTPS_PROXY / https_proxy env, else no proxy.
+  proxy: z.string().default(""),
 });
 
 const Daemon = z.object({

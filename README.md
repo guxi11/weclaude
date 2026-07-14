@@ -52,48 +52,27 @@ npm i -g github:<你的用户名>/weclaude          # 默认分支
 npm i -g github:<你的用户名>/weclaude#<分支名>   # 指定分支
 ```
 
-**内网 / 需要正向代理**：weclaude 的出站（WeCom WebSocket、智能机器人文档 MCP）会读环境变量里的代理。安装与运行都带上 `HTTPS_PROXY`：
+**内网 / 需要正向代理**：weclaude 的出站有两条路，代理来源不同——
+
+- **WeCom WebSocket**（daemon 长连接）：底层 `ws` 库**不认 `HTTPS_PROXY` 环境变量**，必须在 `config.jsonc` 里写 `bot.proxy`，daemon 才会给 socket 挂上 proxy agent。只设环境变量会一直卡在 `wsConnected: false`。
+- **智能机器人文档 MCP / 文件下载**（axios）：走环境变量里的 `HTTPS_PROXY` 即可。
 
 ```bash
-HTTPS_PROXY=http://your-proxy:port npm i -g github:<你的用户名>/weclaude
-# 也可在 config.jsonc 写死: bot.proxy = "http://your-proxy:port"（优先级高于环境变量）
+HTTPS_PROXY=http://your-proxy:port npm i -g github:<你的用户名>/weclaude   # 安装阶段
+```
+```jsonc
+// ~/.weclaude/config.jsonc —— WebSocket 走代理靠这行（env 对 WS 无效）
+"bot": { "proxy": "http://your-proxy:port" }
 ```
 
-daemon 进程同样需要能读到代理变量（见下方守护脚本里 `export HTTPS_PROXY`）。
+`bot.proxy` 优先级高于环境变量；缺省时 daemon 回退到 `HTTPS_PROXY` / `https_proxy`。
 
-**无 systemd 的环境（容器等）**：`init` 装 daemon 这步在 macOS 走 launchd、Linux 走 `systemd --user`。若机器没有 systemd user session（很多容器：PID 1 非 systemd、无 `XDG_RUNTIME_DIR`），这步会失败——其余配置（hook / MCP / 插件）已生效，只差 daemon 没被托管。用一个简单的重启循环守护即可，存成 `~/.weclaude/daemonctl.sh`：
-
-```bash
-#!/usr/bin/env bash
-# 无 systemd 时的 weclaude daemon 守护：setsid 脱离终端的重启循环。
-set -uo pipefail
-REPO="$(npm root -g)/weclaude"
-NODE="$(command -v node)"
-WC="$HOME/.weclaude"; PIDFILE="$WC/supervisor.pid"; LOG="$WC/daemon.log"
-mkdir -p "$WC"
-# 内网：daemon 出站要走代理。按需改成你的代理地址，或删掉这两行。
-export HTTPS_PROXY="${HTTPS_PROXY:-http://your-proxy:port}"; export https_proxy="$HTTPS_PROXY"
-export NO_PROXY="${NO_PROXY:-127.0.0.1,localhost}"; export no_proxy="$NO_PROXY"
-is_running(){ [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
-case "${1:-start}" in
-  start)   is_running && { echo "already running"; exit 0; }
-           setsid bash "$0" __loop </dev/null >>"$LOG" 2>&1 & echo $! >"$PIDFILE"
-           sleep 2; echo "[daemonctl] started (pid $(cat "$PIDFILE"))" ;;
-  __loop)  while [[ -f "$PIDFILE" ]]; do "$NODE" "$REPO/dist/daemon/index.js" >>"$LOG" 2>&1
-             [[ -f "$PIDFILE" ]] || break; sleep 5; done ;;
-  stop)    [[ -f "$PIDFILE" ]] && { pid=$(cat "$PIDFILE"); rm -f "$PIDFILE"
-             pkill -P "$pid" 2>/dev/null||true; kill "$pid" 2>/dev/null||true; }
-           pkill -f "$REPO/dist/daemon/index.js" 2>/dev/null||true; echo "[daemonctl] stopped" ;;
-  restart) bash "$0" stop; sleep 1; bash "$0" start ;;
-  status)  is_running && echo "running (pid $(cat "$PIDFILE"))" || echo "stopped"
-           curl -sS -m2 http://127.0.0.1:17890/status 2>/dev/null && echo || echo "(HTTP :17890 无响应)" ;;
-esac
-```
+**无 systemd 的环境（容器等）**：`init` 装 daemon 这步在 macOS 走 launchd、Linux 走 `systemd --user`。若机器没有 systemd user session（很多容器：PID 1 非 systemd、无 `XDG_RUNTIME_DIR`），`install.sh` 会**自动回退**到一个 setsid 重启循环守护（`scripts/daemonctl.sh` → 拷到 `~/.weclaude/daemonctl.sh`），不再中断安装。手动控制：
 
 ```bash
-chmod +x ~/.weclaude/daemonctl.sh
 ~/.weclaude/daemonctl.sh start    # 起 daemon（自带崩溃重启）
-~/.weclaude/daemonctl.sh status   # 看状态
+~/.weclaude/daemonctl.sh status   # 看状态（含 HTTP :17890 探活）
+~/.weclaude/daemonctl.sh restart  # 改完 config / 更新后重启
 ```
 
 容器重启不会自动拉起 daemon——把 `~/.weclaude/daemonctl.sh start` 加进 shell profile 或容器入口即可（幂等，已在跑就 no-op）。

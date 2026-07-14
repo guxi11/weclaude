@@ -6,6 +6,10 @@ import {
   WSReconnectExhaustedError,
   type Logger as SdkLogger,
 } from "@wecom/aibot-node-sdk";
+// https-proxy-agent@5 is CommonJS: a factory function is the default export.
+// Under Node ESM the named `{ HttpsProxyAgent }` import fails at runtime, so
+// import the factory and call it.
+import createHttpsProxyAgent from "https-proxy-agent";
 import type { Logger } from "pino";
 import type { Config } from "../shared/config.js";
 
@@ -24,6 +28,11 @@ const sdkLogger = (log: Logger): SdkLogger => ({
   error: (msg, ...a) => log.error({ a }, String(msg)),
 });
 
+// Config `bot.proxy` wins over env; the `ws` lib ignores HTTPS_PROXY so we read
+// it ourselves and hand the SDK an explicit agent. Empty → no proxy (direct).
+const resolveProxy = (bot: Config["bot"]): string =>
+  bot.proxy || process.env.HTTPS_PROXY || process.env.https_proxy || "";
+
 export interface DaemonWs {
   client: WSClient;
   /** resolves on first authenticated; rejects on fatal auth/reconnect failure */
@@ -33,7 +42,8 @@ export interface DaemonWs {
 
 export const startWs = (cfg: Config, log: Logger): DaemonWs => {
   const { bot } = cfg;
-  log.info({ botId: bot.botId, ws: bot.websocketUrl }, "WS init");
+  const proxy = resolveProxy(bot);
+  log.info({ botId: bot.botId, ws: bot.websocketUrl, proxy: proxy || undefined }, "WS init");
 
   const client = new WSClient({
     botId: bot.botId,
@@ -45,6 +55,9 @@ export const startWs = (cfg: Config, log: Logger): DaemonWs => {
     maxAuthFailureAttempts: MAX_AUTH_FAIL,
     scene: SCENE,
     plug_version: PLUG_VERSION,
+    // `ws` forwards this straight into `new WebSocket(url, opts)`. Without an
+    // explicit agent, an internal-network host can never open the socket.
+    ...(proxy ? { wsOptions: { agent: createHttpsProxyAgent(proxy) } } : {}),
   });
 
   let resolveReady!: () => void;

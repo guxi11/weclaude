@@ -70,6 +70,7 @@
     "@modelcontextprotocol/sdk": "^1.0.0",
     "@wecom/aibot-node-sdk": "^1.0.6",
     "diff": "^9.0.0",
+    "https-proxy-agent": "^5.0.1",
     "jsonc-parser": "^3.3.1",
     "pino": "^9.5.0",
     "zod": "^3.23.8"
