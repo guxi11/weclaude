@@ -648,10 +648,10 @@ interface PlanHandleArgs {
   client: WSClient;
   body: ApproveReq;
   getMirrorTarget?: (sessionId: string) => string | undefined;
-  setAutoModeForTarget?: (target: string) => Promise<{ ok: boolean; reason?: string; already?: boolean }>;
+  setAutoModeForSession?: (sessionId: string) => Promise<{ ok: boolean; reason?: string; already?: boolean }>;
 }
 
-const handleExitPlanMode = async ({ cfg, log, client, body, getMirrorTarget, setAutoModeForTarget }: PlanHandleArgs): Promise<ApproveResp> => {
+const handleExitPlanMode = async ({ cfg, log, client, body, getMirrorTarget, setAutoModeForSession }: PlanHandleArgs): Promise<ApproveResp> => {
   const plan = parsePlanInput(body.tool_input);
   if (!plan) return { decision: "ask", reason: "plan_unparsable" };
 
@@ -706,20 +706,23 @@ const handleExitPlanMode = async ({ cfg, log, client, body, getMirrorTarget, set
     // 不切的话用户得对每个 tool 再点授权卡,体验割裂。best-effort、fire-and-forget:
     //   - 必须先让本 handler 返回 deny+reason(hook 正 park 在它上面)—— Claude 收到
     //     后才退出 plan mode 开始执行, TUI footer 才从 plan 变成可切换态。所以延时
-    //     后再 setAutoMode(此刻直接切,pane 还在 plan picker 上,BTab 落点不准)。
+    //     后再切(此刻直接切,pane 还在 plan picker 上,BTab 落点不准)。
+    //   - 按 sessionId 切,而不是按镜像 target:发起 plan 的会话常常不是当前聊天
+    //     镜像的那个(它只是靠 defaultChat 兜底把卡片路由到这里),按 target 找会
+    //     miss。setAutoModeBySession 直接从进程树按 sessionId 定位 pane。
     //   - 失败只记 warn,绝不影响计划放行(CLAUDE.md: 错误不破坏工作流)。
-    //   - 仅 mirror 模式有 setAutoModeForTarget; headless 下为 undefined,跳过。
-    const target = body.session_id ? getMirrorTarget?.(body.session_id) : undefined;
-    if (target && setAutoModeForTarget) {
-      const doSwitch = setAutoModeForTarget;
+    //   - 仅 mirror 模式有 setAutoModeForSession; headless 下为 undefined,跳过。
+    const sid = body.session_id;
+    if (sid && setAutoModeForSession) {
+      const doSwitch = setAutoModeForSession;
       setTimeout(() => {
-        doSwitch(target)
+        doSwitch(sid)
           .then((r) =>
             r.ok
-              ? log.info({ target, already: r.already }, "plan approved → auto mode set")
-              : log.warn({ target, reason: r.reason }, "plan approved → auto mode switch failed"),
+              ? log.info({ sessionId: sid, already: r.already }, "plan approved → auto mode set")
+              : log.warn({ sessionId: sid, reason: r.reason }, "plan approved → auto mode switch failed"),
           )
-          .catch((e) => log.warn({ target, err: (e as Error).message }, "plan approved → auto mode threw"));
+          .catch((e) => log.warn({ sessionId: sid, err: (e as Error).message }, "plan approved → auto mode threw"));
       }, 2500);
     }
     // 同意也走 deny+reason,而不是 allow:实测 allow 在非 auto-mode 会话里仍会弹
@@ -870,10 +873,12 @@ interface ApprovalDeps {
    *  instead of cfg.approval.approvers[0] / cfg.defaultChat — keeps the conversation and
    *  its approval prompts in the same WeCom chat. */
   getMirrorTarget?: (sessionId: string) => string | undefined;
-  /** Optional (mirror mode only): switch a target's mirrored session into auto
-   *  permission mode. Used to auto-enter auto mode right after a plan approval,
-   *  so the ensuing tool run doesn't card the user for every step. */
-  setAutoModeForTarget?: (target: string) => Promise<{ ok: boolean; reason?: string; already?: boolean }>;
+  /** Optional (mirror mode only): switch a session into auto permission mode by
+   *  its Claude sessionId. Used to auto-enter auto mode right after a plan
+   *  approval, so the ensuing tool run doesn't card the user for every step.
+   *  Keyed on sessionId (not mirror target) because the approving session may
+   *  not be the chat's mirrored one. */
+  setAutoModeForSession?: (sessionId: string) => Promise<{ ok: boolean; reason?: string; already?: boolean }>;
 }
 
 const resolveApprover = (
@@ -885,7 +890,7 @@ const resolveApprover = (
   return mirror || pickApprover(cfg);
 };
 
-export const makeApproveHandler = ({ cfg, log, client, getMirrorTarget, setAutoModeForTarget }: ApprovalDeps): Handler => {
+export const makeApproveHandler = ({ cfg, log, client, getMirrorTarget, setAutoModeForSession }: ApprovalDeps): Handler => {
   const detailUrlFor = (id: string): string =>
     buildDetailUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, id);
 
@@ -995,7 +1000,7 @@ export const makeApproveHandler = ({ cfg, log, client, getMirrorTarget, setAutoM
         log,
         client,
         getMirrorTarget,
-        setAutoModeForTarget,
+        setAutoModeForSession,
         body: {
           session_id: sessionId,
           tool_name: toolName,

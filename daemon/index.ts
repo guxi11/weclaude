@@ -79,14 +79,15 @@ const main = async (): Promise<void> => {
       : undefined;
   // Mirror mode only: let the approval flow flip a session into auto mode right
   // after a plan approval (so the ensuing tool run doesn't re-card every step).
-  const setAutoModeForTarget =
+  // Keyed on sessionId — the approving session may not be the chat's mirrored one.
+  const setAutoModeForSession =
     cfg.wrc.mode === "mirror"
-      ? (target: string) => (bridge as MirrorBridge).setAutoMode(target)
+      ? (sid: string) => (bridge as MirrorBridge).setAutoModeBySession(sid)
       : undefined;
   const http = startHttp({ cfg, ws, log, sourcePath });
   http.register(
     "POST /approve",
-    makeApproveHandler({ cfg, log: log.child({ mod: "approval" }), client: ws.client, getMirrorTarget, setAutoModeForTarget }),
+    makeApproveHandler({ cfg, log: log.child({ mod: "approval" }), client: ws.client, getMirrorTarget, setAutoModeForSession }),
   );
   http.register("POST /message", makeMessageHandler(ws.client, log.child({ mod: "outbound" })));
   http.register("POST /card", makeCardHandler(ws.client, log.child({ mod: "outbound" })));

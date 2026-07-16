@@ -922,6 +922,11 @@ export interface MirrorBridge {
    *  the TUI footer to land precisely. `already` = was already auto. Only works
    *  on a session consuming keys; a wedged one won't react (use /escape). */
   setAutoMode: (target: string) => Promise<{ ok: boolean; reason?: string; already?: boolean }>;
+  /** Like setAutoMode but keyed on the Claude sessionId directly — no mirror
+   *  attachment needed. Locates the live pane via the process tree. Used by
+   *  plan-approval auto-switch, where the approving session may not be the
+   *  chat's mirrored one. */
+  setAutoModeBySession: (sessionId: string) => Promise<{ ok: boolean; reason?: string; already?: boolean }>;
   /** Cwd lifecycle for the chat-bound project path. `getCwd` returns
    *  `{ runningCwd, pendingCwd, defaultCwd }` so /pwd can render all three
    *  truthfully. `setPendingCwd` writes the user-requested next cwd into the
@@ -1548,6 +1553,70 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     return r.code === 0 && r.stdout.trim() === paneId;
   };
 
+  // Cycle a live tmux pane's Claude permission mode to "auto" via Shift+Tab
+  // (tmux `BTab`). Shared by /auto (target-keyed) and plan-approval auto-switch
+  // (sessionId-keyed) — both resolve a live pane, then hand it here.
+  // Cycle (tested 2026-06-25): default → accept edits → plan → auto → default.
+  const cyclePaneToAuto = async (
+    pane: string,
+    ctx: { target?: string; sessionId?: string },
+  ): Promise<{ ok: boolean; reason?: string; already?: boolean }> => {
+    // Steps-to-auto for each mode in the forward Shift+Tab cycle.
+    const STEPS: Record<string, number> = { default: 3, accept: 2, plan: 1, auto: 0 };
+    const readMode = async (): Promise<keyof typeof STEPS> => {
+      const r = await tmuxRun(["capture-pane", "-t", pane, "-p", "-S", "-20"]);
+      // The mode footer lives in the chrome region BELOW the input box's bottom
+      // separator rule (a line of "─"). Layout, bottom-up:
+      //   ─────────   ← bottom separator rule
+      //   ⏵⏵ auto mode on · 4 shells · ctrl+t to hide tasks · …   ← the footer
+      //   …            new task? /clear to save 93%               ← context hint
+      // Two traps this avoids:
+      //   1. the footer is NOT the last line — a context-usage hint can sit
+      //      below it (taking the last line read that hint → "default" → the
+      //      "plan mode → 3 BTab" overshoot bug).
+      //   2. the hint suffix is unstable (tasks/agents panel drops
+      //      "(shift+tab to cycle)") — so we match the mode PHRASE, not the hint.
+      // Restricting to lines below the last separator rule also excludes the
+      // transcript (which is above the input box) from polluting the match.
+      const all = r.stdout.split("\n");
+      const lastRule = all.map((l) => /^\s*─{6,}\s*$/.test(l)).lastIndexOf(true);
+      const region = (lastRule >= 0 ? all.slice(lastRule + 1) : all).join("\n");
+      if (/auto mode on/.test(region)) return "auto";
+      if (/plan mode on/.test(region)) return "plan";
+      if (/accept edits on/.test(region)) return "accept";
+      // No mode phrase below the rule ⇒ default ("? for shortcuts").
+      return "default";
+    };
+    // Read the current mode WITHOUT touching the pane first. The old code sent
+    // an unconditional Escape "to clear popups" — but on a busy session whose
+    // footer reads "esc to interrupt", that Escape aborts the running task. And
+    // it fired even when already auto (STEPS=0), interrupting for nothing. BTab
+    // is a pure mode-cycle key and does not interrupt generation, so we only
+    // need Escape to dismiss a genuine transient popup — which shows up as an
+    // unreadable mode. Read first; bail early if already auto (no keys sent).
+    let mode = await readMode();
+    if (mode === "auto") return { ok: true, already: true };
+    // A transient popup (e.g. a selection dialog) can hide the real footer and
+    // make readMode fall through to "default", overshooting the BTab count. If
+    // the pane is NOT busy-interruptible, dismiss it once and re-read. We detect
+    // "busy" by the interrupt hint so we never abort a running task.
+    const snap = await tmuxRun(["capture-pane", "-t", pane, "-p", "-S", "-20"]);
+    const busy = /esc to interrupt/.test(snap.stdout);
+    if (!busy) {
+      await tmuxRun(["send-keys", "-t", pane, "Escape"]);
+      await sleepMs(300);
+      mode = await readMode();
+      if (mode === "auto") return { ok: true, already: true };
+    }
+    for (let i = 0; i < STEPS[mode]!; i++) {
+      await tmuxRun(["send-keys", "-t", pane, "BTab"]);
+      await sleepMs(250);
+    }
+    const after = await readMode();
+    log.info({ ...ctx, pane, from: mode, after, busy }, "mirror /auto — cycled permission mode");
+    return after === "auto" ? { ok: true } : { ok: false, reason: `切换后停在 ${after},未到 auto` };
+  };
+
   // Re-attach a stored binding for `principal`. Returns the resulting state, or
   // undefined if the on-disk transcript is gone (in which case the entry is
   // dropped so the next inbound flows through /new auto-spawn).
@@ -2074,60 +2143,20 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           return { ok: false, reason: "tmux pane no longer alive (session not found in live scan)" };
         }
       }
-      // Steps-to-auto for each mode in the forward Shift+Tab cycle.
-      const STEPS: Record<string, number> = { default: 3, accept: 2, plan: 1, auto: 0 };
-      const readMode = async (): Promise<keyof typeof STEPS> => {
-        const r = await tmuxRun(["capture-pane", "-t", pane, "-p", "-S", "-20"]);
-        // The mode footer lives in the chrome region BELOW the input box's bottom
-        // separator rule (a line of "─"). Layout, bottom-up:
-        //   ─────────   ← bottom separator rule
-        //   ⏵⏵ auto mode on · 4 shells · ctrl+t to hide tasks · …   ← the footer
-        //   …            new task? /clear to save 93%               ← context hint
-        // Two traps this avoids:
-        //   1. the footer is NOT the last line — a context-usage hint can sit
-        //      below it (taking the last line read that hint → "default" → the
-        //      "plan mode → 3 BTab" overshoot bug).
-        //   2. the hint suffix is unstable (tasks/agents panel drops
-        //      "(shift+tab to cycle)") — so we match the mode PHRASE, not the hint.
-        // Restricting to lines below the last separator rule also excludes the
-        // transcript (which is above the input box) from polluting the match.
-        const all = r.stdout.split("\n");
-        const lastRule = all.map((l) => /^\s*─{6,}\s*$/.test(l)).lastIndexOf(true);
-        const region = (lastRule >= 0 ? all.slice(lastRule + 1) : all).join("\n");
-        if (/auto mode on/.test(region)) return "auto";
-        if (/plan mode on/.test(region)) return "plan";
-        if (/accept edits on/.test(region)) return "accept";
-        // No mode phrase below the rule ⇒ default ("? for shortcuts").
-        return "default";
-      };
-      // Read the current mode WITHOUT touching the pane first. The old code sent
-      // an unconditional Escape "to clear popups" — but on a busy session whose
-      // footer reads "esc to interrupt", that Escape aborts the running task. And
-      // it fired even when already auto (STEPS=0), interrupting for nothing. BTab
-      // is a pure mode-cycle key and does not interrupt generation, so we only
-      // need Escape to dismiss a genuine transient popup — which shows up as an
-      // unreadable mode. Read first; bail early if already auto (no keys sent).
-      let mode = await readMode();
-      if (mode === "auto") return { ok: true, already: true };
-      // A transient popup (e.g. a selection dialog) can hide the real footer and
-      // make readMode fall through to "default", overshooting the BTab count. If
-      // the pane is NOT busy-interruptible, dismiss it once and re-read. We detect
-      // "busy" by the interrupt hint so we never abort a running task.
-      const snap = await tmuxRun(["capture-pane", "-t", pane, "-p", "-S", "-20"]);
-      const busy = /esc to interrupt/.test(snap.stdout);
-      if (!busy) {
-        await tmuxRun(["send-keys", "-t", pane, "Escape"]);
-        await sleepMs(300);
-        mode = await readMode();
-        if (mode === "auto") return { ok: true, already: true };
+      return cyclePaneToAuto(pane, { target, sessionId: a.sessionId });
+    },
+    // Switch a session into auto mode by its Claude sessionId ALONE — no mirror
+    // attachment required. Used by plan-approval auto-switch: the approving
+    // session is often NOT the chat's mirrored one (it just routed its card here
+    // via defaultChat fallback), so a target-keyed lookup would miss it. Locate
+    // the live pane straight from the process tree.
+    setAutoModeBySession: async (sessionId) => {
+      if (!sessionId) return { ok: false, reason: "no sessionId" };
+      const scanned = (await scanClaudeSessions()).find((s) => s.sessionId === sessionId);
+      if (!scanned?.tmuxPane || !(await tmuxPaneAlive(scanned.tmuxPane))) {
+        return { ok: false, reason: "session not found in live tmux scan" };
       }
-      for (let i = 0; i < STEPS[mode]!; i++) {
-        await tmuxRun(["send-keys", "-t", pane, "BTab"]);
-        await sleepMs(250);
-      }
-      const after = await readMode();
-      log.info({ target, sessionId: a.sessionId, pane, from: mode, after, busy }, "mirror /auto — cycled permission mode");
-      return after === "auto" ? { ok: true } : { ok: false, reason: `切换后停在 ${after},未到 auto` };
+      return cyclePaneToAuto(scanned.tmuxPane, { sessionId });
     },
     getCwd,
     setPendingCwd,
