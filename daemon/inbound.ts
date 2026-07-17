@@ -79,10 +79,15 @@ const parseSessionsCommand = (text: string): { arg: string } | undefined => {
 // session currently mirrored to this chat's target (if any) is flagged.
 const renderSessionsList = (sessions: SessionInfo[], currentSid: string): string => {
   if (sessions.length === 0) return "[weclaude] 未发现正在运行的 Claude 会话";
-  const lines = sessions.map((s) => {
+  // Newest-active first so the list reads top-down by relevance.
+  const ordered = [...sessions].sort((a, b) => b.lastActivity - a.lastActivity);
+  const labels = disambiguateLabels(ordered);
+  const lines = ordered.map((s, i) => {
     const here = s.sessionId === currentSid ? " ⬅️ 当前" : "";
     const dir = s.cwd.replace(/^.*\//, "") || s.cwd || "?";
-    return `${s.label || "▫️"} \`${s.sessionId.slice(0, 8)}\` ${dir}${here}`;
+    const when = s.lastActivity ? ` · ${relTime(s.lastActivity)}` : "";
+    const sum = s.summary ? `\n   ↳ ${s.summary}` : "";
+    return `${labels[i]} \`${s.sessionId.slice(0, 8)}\` ${dir}${when}${here}${sum}`;
   });
   return [
     "[weclaude] 正在运行的会话：",
@@ -91,12 +96,62 @@ const renderSessionsList = (sessions: SessionInfo[], currentSid: string): string
   ].join("\n");
 };
 
+// Relative "time since" in Chinese, coarse buckets. Input is epoch ms.
+const relTime = (ms: number): string => {
+  const sec = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+  if (sec < 60) return "刚刚";
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min} 分钟前`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr} 小时前`;
+  return `${Math.floor(hr / 24)} 天前`;
+};
+
+// labelFor hashes into a 30-emoji space, so several live sessions can collide on
+// the same animal (birthday paradox). Keep the stable per-session emoji, but when
+// two listed sessions share one, append a deterministic superscript so the list
+// shows distinct, switchable tags. Order-stable: caller passes an already-sorted
+// list, and same emoji → same suffix assignment for that render.
+const SUPERSCRIPTS = ["¹", "²", "³", "⁴", "⁵", "⁶", "⁷", "⁸", "⁹"];
+const disambiguateLabels = (sessions: SessionInfo[]): string[] => {
+  const counts = new Map<string, number>();
+  for (const s of sessions) counts.set(s.label, (counts.get(s.label) ?? 0) + 1);
+  const seen = new Map<string, number>();
+  return sessions.map((s) => {
+    if ((counts.get(s.label) ?? 0) <= 1) return s.label;
+    const n = seen.get(s.label) ?? 0;
+    seen.set(s.label, n + 1);
+    return `${s.label}${SUPERSCRIPTS[n] ?? `#${n + 1}`}`;
+  });
+};
+
 // Match a switch arg against a scanned session: animal emoji label, full
-// sessionId, or a ≥6 char sessionId prefix. Returns the session or undefined.
-const matchSession = (sessions: SessionInfo[], arg: string): SessionInfo | undefined =>
-  sessions.find((s) => s.label === arg) ??
-  sessions.find((s) => s.sessionId === arg) ??
-  (arg.length >= 6 ? sessions.find((s) => s.sessionId.startsWith(arg)) : undefined);
+// sessionId, or a ≥6 char sessionId prefix. Returns the session, undefined (no
+// match), or "ambiguous" when a bare emoji maps to several live sessions (the
+// user must then disambiguate by sessionId — the list shows both). A trailing
+// superscript (🐙²) selects the Nth session sharing that emoji, ordered like the
+// list (newest-active first).
+type MatchResult = SessionInfo | undefined | "ambiguous";
+const SUP_TO_IDX: Record<string, number> = { "¹": 0, "²": 1, "³": 2, "⁴": 3, "⁵": 4, "⁶": 5, "⁷": 6, "⁸": 7, "⁹": 8 };
+const matchSession = (sessions: SessionInfo[], arg: string): MatchResult => {
+  // sessionId exact / prefix first — always unambiguous.
+  const byId =
+    sessions.find((s) => s.sessionId === arg) ??
+    (arg.length >= 6 ? sessions.find((s) => s.sessionId.startsWith(arg)) : undefined);
+  if (byId) return byId;
+  // Emoji with an explicit superscript index, e.g. 🐙².
+  const supMatch = /^(.+?)([¹²³⁴⁵⁶⁷⁸⁹])$/u.exec(arg);
+  if (supMatch) {
+    const [, base, sup] = supMatch;
+    const ordered = [...sessions].sort((a, b) => b.lastActivity - a.lastActivity).filter((s) => s.label === base);
+    return ordered[SUP_TO_IDX[sup!]!];
+  }
+  // Bare emoji: unique → that session; multiple → ambiguous.
+  const sameLabel = sessions.filter((s) => s.label === arg);
+  if (sameLabel.length === 1) return sameLabel[0];
+  if (sameLabel.length > 1) return "ambiguous";
+  return undefined;
+};
 
 // /escape — one-shot "get me out of a stuck session". Like /sessions but picks
 // the destination automatically: switch to the most-recently-active OTHER live
@@ -369,6 +424,15 @@ export const installInboundRouter = (
         return { stop: true, who };
       }
       const hit = matchSession(sessions, sc.arg);
+      if (hit === "ambiguous") {
+        const dupes = sessions
+          .filter((s) => s.label === sc.arg)
+          .sort((a, b) => b.lastActivity - a.lastActivity)
+          .map((s, i) => `${s.label}${SUPERSCRIPTS[i] ?? ""} \`${s.sessionId.slice(0, 8)}\``)
+          .join("、");
+        try { await client.replyStream(frame, msg.msgid, `[weclaude] ${sc.arg} 对应多个会话，请指定：${dupes}（用带角标的 emoji 或 8 位 id）`, true); } catch { /* ignore */ }
+        return { stop: true, who };
+      }
       if (!hit) {
         const avail = sessions.map((s) => `${s.label || "▫️"} ${s.sessionId.slice(0, 8)}`).join("、") || "无";
         try { await client.replyStream(frame, msg.msgid, `[weclaude] 未找到会话 \`${sc.arg}\`。可用：${avail}`, true); } catch { /* ignore */ }
