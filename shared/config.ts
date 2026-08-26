@@ -98,6 +98,10 @@ const Mirror = z.object({
   // 中间 tool_use / tool_result / thinking / 非 final text 全部只写进详情页,不发气泡。
   // 授权卡照常发群 (交互无法替代)。false = 现状 (逐条气泡)。
   brief: z.boolean().default(true),
+  // Think style (brief 模式下生效): 开启后本轮的 thinking 不再只进详情页,而是把整段
+  // 思考以 `<think>…</think>` 前缀拼进最终答复气泡: `<think>xxx</think>\n\nfinal reply`。
+  // 关闭 (默认) = 现状: thinking 只写详情, 聊天只见最终答复。
+  thinkStyle: z.boolean().default(false),
   // ── Prompt-cache keepalive ────────────────────────────────────────────
   // Anthropic prompt caching: cache-write costs 1.25x, cache-read 0.1x, and the
   // cache lives only ~5min. A pane that goes idle (agent parked waiting on a

@@ -254,6 +254,9 @@ interface TailDeps {
   log: Logger;
   includeUser: boolean;
   includeTools: boolean;
+  /** Emit `thinking` RenderItems from thinking blocks (brief think-style). When
+   *  false the parser skips them entirely (现状 — 只进详情, 不下发)。 */
+  thinkStyle: boolean;
   includeToolResults: boolean;
   toolResultMaxChars: number;
   toolUseInlineMaxChars: number;
@@ -287,6 +290,8 @@ interface TailDeps {
 interface ContentBlock {
   type?: string;
   text?: string;
+  // thinking block ({type:"thinking", thinking:"..."})
+  thinking?: string;
   // tool_use
   id?: string;
   name?: string;
@@ -453,6 +458,9 @@ const DETAIL_RESULT_MAX = 64 * 1024;
 // of band on the item so the caller can register them for click-to-detail.
 type RenderItem =
   | { kind: "text"; body: string; final?: boolean }
+  // Assistant thinking block. Only emitted when thinkStyle is on. Accumulated
+  // across the turn and prepended as `<think>…</think>` to the final reply bubble.
+  | { kind: "thinking"; body: string }
   // CLI-side user line (not a WeCom inject). Marks a turn boundary that did
   // NOT originate from the still-open WeCom liveStream — onItem uses this to
   // finalize the prior bubble so the new conversation gets its own bubble.
@@ -701,8 +709,13 @@ const renderLine = (raw: string, deps: TailDeps): RenderItem[] => {
         // 同名扩展当前 group; 不同名先 flush 再起新组。
         if (pending.length > 0 && pending[0]!.name !== name) flushPending();
         pending.push({ toolUseId, name, input: b.input });
+      } else if (b?.type === "thinking" && deps.thinkStyle) {
+        flushPending();
+        const raw = typeof b.thinking === "string" ? b.thinking : typeof b.text === "string" ? b.text : "";
+        const t = raw.trim();
+        if (t) out.push({ kind: "thinking", body: t });
       }
-      // thinking blocks intentionally skipped
+      // thinking blocks otherwise intentionally skipped (只进详情页)
     }
     flushPending();
     // Emit per-line usage snapshot BEFORE turn_end so brief store gets the last
@@ -1756,6 +1769,8 @@ interface AttachState {
   briefConcluded?: boolean;
   /** 本 turn 最近一条 assistant text。软收口没有"终句"标记, 收口时拿它当结论。 */
   briefLastText?: string;
+  /** 本 turn 累积的 thinking (think-style 开启时)。收口时拼成 `<think>…</think>` 前缀。 */
+  briefThinking?: string;
   /** 软收口的静默期计时器 —— 任何新 item 到达即撤销。 */
   softEnd?: NodeJS.Timeout;
   /** CLI 侧最近一条用户输入, 用作下一个"无气泡 turn"(ensureBriefTurn) 的 userQuery。
@@ -2318,6 +2333,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.briefHadTool = false;
     a.briefConcluded = false;
     a.briefLastText = undefined;
+    a.briefThinking = undefined;
     log.info({ sessionId: a.sessionId, turnId: q.turnId, isSlash: q.isSlash }, "brief: turn started");
   };
 
@@ -2393,6 +2409,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.briefHadTool = false;
     a.briefConcluded = false;
     a.briefLastText = undefined;
+    a.briefThinking = undefined;
     sendRaw(a, briefDetailLink(turnId, a.target));
     log.info({ sessionId: a.sessionId, turnId }, "brief: turn started (CLI-side, no bubble)");
   };
@@ -2415,8 +2432,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const turnId = a.briefTurnId;
     if (!turnId || a.briefConcluded || !body.trim()) return;
     a.briefConcluded = true;
-    if (a.briefHadTool || !a.briefBubble) sendStandalone(a, body);
-    else void finishBriefBubble(a, `${body}\n\n${briefDetailLink(turnId, a.target)}`);
+    // think-style: 把本轮累积的 thinking 以 <think>…</think> 前缀拼进最终答复。
+    const think = a.briefThinking?.trim();
+    const out = think ? `<think>${think}</think>\n\n${body}` : body;
+    if (a.briefHadTool || !a.briefBubble) sendStandalone(a, out);
+    else void finishBriefBubble(a, `${out}\n\n${briefDetailLink(turnId, a.target)}`);
     // 排队中的 turn 已经建了记录但还没跑, 不能被这把扫帚扫成「已完成」。
     const keep = [turnId, ...(a.briefQueue ?? []).map((q) => q.turnId)];
     recordCloseOpenTurns({ target: a.target, sessionId: a.sessionId, exceptIds: keep });
@@ -2440,6 +2460,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.briefIsSlash = false;
     a.briefConcluded = false;
     a.briefLastText = undefined;
+    a.briefThinking = undefined;
     // 放行下一个排队的 turn —— 它的气泡早在 ack 时就挂出去了, 这里只是激活。
     const next = a.briefQueue?.shift();
     if (next) openBriefTurn(a, next);
@@ -2551,6 +2572,12 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (item.kind === "tool_result") {
       earlyLinkBubble(a);
       recordTurnItem(turnId, { t: "tool_result", toolUseId: item.toolUseId, body: item.full, ts: now });
+      return;
+    }
+    if (item.kind === "thinking") {
+      // think-style: 累积供收口时拼前缀; 仍写进 turn store 让详情页也保留思考。
+      a.briefThinking = a.briefThinking ? `${a.briefThinking}\n\n${item.body}` : item.body;
+      recordTurnItem(turnId, { t: "text", body: item.body, ts: now });
       return;
     }
     if (item.kind === "text") {
@@ -2960,6 +2987,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       log: log.child({ sub: "tail", sessionId }),
       includeUser: cfg.wrc.mirror.includeUser,
       includeTools: cfg.wrc.mirror.includeTools,
+      thinkStyle: cfg.wrc.mirror.thinkStyle && cfg.wrc.mirror.brief,
       includeToolResults: cfg.wrc.mirror.includeToolResults,
       toolResultMaxChars: cfg.wrc.mirror.toolResultMaxChars,
       toolUseInlineMaxChars: cfg.wrc.mirror.toolUseInlineMaxChars,
@@ -3327,6 +3355,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       log: log.child({ sub: "tail", sessionId: newSessionId }),
       includeUser: cfg.wrc.mirror.includeUser,
       includeTools: cfg.wrc.mirror.includeTools,
+      thinkStyle: cfg.wrc.mirror.thinkStyle && cfg.wrc.mirror.brief,
       includeToolResults: cfg.wrc.mirror.includeToolResults,
       toolResultMaxChars: cfg.wrc.mirror.toolResultMaxChars,
       toolUseInlineMaxChars: cfg.wrc.mirror.toolUseInlineMaxChars,
