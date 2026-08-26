@@ -23,6 +23,8 @@ export type CliBackendName = "claude" | "claude-internal" | "codebuddy";
 export interface NormalizedContentBlock {
   type?: string;
   text?: string;
+  // thinking block (Claude Code shape). CodeBuddy's reasoning_text is normalized into this.
+  thinking?: string;
   // tool_use
   id?: string;
   name?: string;
@@ -136,7 +138,9 @@ const makeClaude = (name: CliBackendName, bin: string): CliBackend => {
 //                            id(==host assistant msg id), parentId }
 //   function_call_result → { type:"function_call_result", callId, name, status,
 //                            output:{type:"text", text}, id, parentId }
-//   reasoning | file-history-snapshot | ai-title | summary → drop
+//   reasoning            → { type:"reasoning", rawContent:[{type:"reasoning_text", text}] }
+//                          → mapped to assistant message w/ a `thinking` block (think-style)
+//   file-history-snapshot | ai-title | summary → drop
 //
 // Key structural differences from Claude Code:
 //   1. content block types are input_text/output_text, not "text".
@@ -235,7 +239,26 @@ const normalizeCodebuddy = (raw: unknown): NormalizedTranscriptLine | null => {
     };
   }
 
-  // reasoning / file-history-snapshot / ai-title / summary → drop.
+  // reasoning: thinking lives in rawContent:[{type:"reasoning_text", text}] (not
+  // in content, which is empty). Map into a Claude-shape assistant message with
+  // a `thinking` block so mirror-bridge's think-style path can pick it up.
+  // No softTurnEnd — a reasoning record is never a turn boundary.
+  if (type === "reasoning") {
+    const rawContent = (r.rawContent ?? []) as Array<{ type?: string; text?: string }>;
+    const thinking = rawContent
+      .filter((b) => b?.type === "reasoning_text" && typeof b.text === "string")
+      .map((b) => b.text!)
+      .join("\n\n")
+      .trim();
+    if (!thinking) return null;
+    return {
+      type: "assistant",
+      ...uuids,
+      message: { role: "assistant", content: [{ type: "thinking", thinking }] },
+    };
+  }
+
+  // file-history-snapshot / ai-title / summary → drop.
   return null;
 };
 
