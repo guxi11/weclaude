@@ -1832,6 +1832,8 @@ type OutboundState =
 
 export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const { cfg, log, client } = deps;
+  // think-style: brief 模式下把 thinking 直接流进气泡, 且全程不下发任何详情链接。
+  const thinkStyle = cfg.wrc.mirror.thinkStyle && cfg.wrc.mirror.brief;
   // Multi-mirror: each (sessionId, target) pair is one Attachment. Same
   // sessionId reattaches → replace. Same target with different sessionId →
   // replace too (one WeCom chat can only show one mirror at a time).
@@ -2017,6 +2019,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // Linked tag prefix: emoji+tag becomes a chat-detail link. Falls back to
   // plain withSessionTag when no turnId is available (no active turn to link).
   const linkedTagPrefix = (target: string, turnId: string | undefined): string => {
+    if (thinkStyle) return "";  // think-style: 全程不带详情链接, 一律退回 withSessionTag。
     if (!turnId) return "";
     const url = buildChatUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, turnId, stripPrincipalPrefix(target));
     const tag = tagOfKey(target);
@@ -2325,6 +2328,18 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
 
   const finishBriefBubble = (a: AttachState, content: string, raw = false): Promise<void> => finishBubble(a, a.briefBubble, content, raw);
 
+  // think-style: 把当前累积的 thinking 作为 `<think>…` 流进活着的 loading 气泡
+  // (finish=false, 气泡不关)。收口时再补 `</think>\n\n<final>` 并 finish。
+  // 用 withSessionTag (仅 tag 头), 绝不走 withLinkedTag —— think-style 全程不带详情链接。
+  const streamThink = (a: AttachState): void => {
+    const b = a.briefBubble;
+    const think = a.briefThinking?.trim();
+    if (!b || b.done || !think) return;
+    client
+      .replyStream(b.frame, b.streamId, withSessionTag(a.target, `<think>${think}`), false)
+      .catch((e) => log.warn({ sessionId: a.sessionId, err: (e as Error).message }, "brief: think stream failed"));
+  };
+
   // 让一个已建好记录的 turn 成为活跃 turn。turn 级状态在这里统一归零 —— 唯一入口。
   const openBriefTurn = (a: AttachState, q: QueuedTurn): void => {
     a.briefTurnId = q.turnId;
@@ -2371,12 +2386,19 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         log.warn({ sessionId: a.sessionId, turnId }, "brief: queued turn timed out — force-closing the stuck one");
         closeBriefTurn(a);
       }
-      void finishBubble(a, bubble, briefDetailLink(turnId, a.target), true);
+      // think-style: 到点也不发链接, 有累积 thinking 就收进气泡, 否则空收。
+      if (thinkStyle) {
+        const think = a.briefThinking?.trim();
+        void finishBubble(a, bubble, think ? `<think>${think}</think>` : " ");
+      } else {
+        void finishBubble(a, bubble, briefDetailLink(turnId, a.target), true);
+      }
     }, HARD_TIMEOUT_MS);
     // earlyTimer: 3s 无 CLI 产出 → 先把 loading 气泡收成详情链接, 用户可即时点入。
     // 首条 item 到达时清除 (handleBriefItem 路径)。用显式 bubble ref 而非 a.briefBubble,
     // 因为排队中的 turn 还没成为活跃 turn, a.briefBubble 指向的是前一个。
-    bubble.earlyTimer = setTimeout(() => {
+    // think-style: 不设 earlyTimer —— 不发链接, 气泡留着等 thinking / 答复流进来。
+    if (!thinkStyle) bubble.earlyTimer = setTimeout(() => {
       if (bubble.done) return;
       void finishBubble(a, bubble, briefDetailLink(turnId, a.target), true);
     }, EARLY_LINK_MS);
@@ -2410,7 +2432,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.briefConcluded = false;
     a.briefLastText = undefined;
     a.briefThinking = undefined;
-    sendRaw(a, briefDetailLink(turnId, a.target));
+    // think-style: 不推详情链接 (CLI 侧发起的无气泡 turn 无处可流, 保持静默; 最终答复走 standalone)。
+    if (!thinkStyle) sendRaw(a, briefDetailLink(turnId, a.target));
     log.info({ sessionId: a.sessionId, turnId }, "brief: turn started (CLI-side, no bubble)");
   };
 
@@ -2420,6 +2443,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // briefHadTool, 最终结论照常另发 standalone; closeBriefTurn 见气泡已 done 会跳过。
   const earlyLinkBubble = (a: AttachState): void => {
     if (!a.briefTurnId || !a.briefBubble || a.briefBubble.done) return;
+    // think-style: 不收气泡、不发链接 —— 气泡留着继续流 thinking / 最终答复。
+    if (thinkStyle) { a.briefHadTool = true; return; }
     a.briefHadTool = true;
     void finishBriefBubble(a, briefDetailLink(a.briefTurnId, a.target), true);
   };
@@ -2435,8 +2460,15 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // think-style: 把本轮累积的 thinking 以 <think>…</think> 前缀拼进最终答复。
     const think = a.briefThinking?.trim();
     const out = think ? `<think>${think}</think>\n\n${body}` : body;
-    if (a.briefHadTool || !a.briefBubble) sendStandalone(a, out);
-    else void finishBriefBubble(a, `${out}\n\n${briefDetailLink(turnId, a.target)}`);
+    if (thinkStyle) {
+      // 全程不下发详情链接: 有气泡就把 <think>…</think>+答复收进那一条; 否则 standalone。
+      if (a.briefBubble && !a.briefBubble.done) void finishBriefBubble(a, out);
+      else sendStandalone(a, out);
+    } else if (a.briefHadTool || !a.briefBubble) {
+      sendStandalone(a, out);
+    } else {
+      void finishBriefBubble(a, `${out}\n\n${briefDetailLink(turnId, a.target)}`);
+    }
     // 排队中的 turn 已经建了记录但还没跑, 不能被这把扫帚扫成「已完成」。
     const keep = [turnId, ...(a.briefQueue ?? []).map((q) => q.turnId)];
     recordCloseOpenTurns({ target: a.target, sessionId: a.sessionId, exceptIds: keep });
@@ -2450,7 +2482,13 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // 气泡还开着 (有工具的 turn: 结论只发了 standalone, 气泡留到这里收链接; 或空 turn
     // 没有结论) —— 收口: 统一写详情链接, 保证每个 turn 都有可点入口。
     if (a.briefBubble && !a.briefBubble.done) {
-      void finishBriefBubble(a, briefDetailLink(a.briefTurnId, a.target), true);
+      if (thinkStyle) {
+        // think-style: 不发链接。有累积 thinking 就把 <think>…</think> 收进气泡, 否则空收。
+        const think = a.briefThinking?.trim();
+        void finishBriefBubble(a, think ? `<think>${think}</think>` : " ");
+      } else {
+        void finishBriefBubble(a, briefDetailLink(a.briefTurnId, a.target), true);
+      }
     }
     recordTurnClose(a.briefTurnId);
     log.info({ sessionId: a.sessionId, turnId: a.briefTurnId }, "brief: turn closed");
@@ -2479,7 +2517,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // 一个僵尸 turn 上来当活跃 turn, 白收一遍。
     for (const q of a.briefQueue ?? []) {
       closed++;
-      void finishBubble(a, q.bubble, briefDetailLink(q.turnId, a.target));
+      // think-style: 不发链接, 排队气泡直接空收。
+      void finishBubble(a, q.bubble, thinkStyle ? " " : briefDetailLink(q.turnId, a.target), thinkStyle);
       recordTurnClose(q.turnId);
     }
     a.briefQueue = [];
@@ -2578,11 +2617,19 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // think-style: 累积供收口时拼前缀; 仍写进 turn store 让详情页也保留思考。
       a.briefThinking = a.briefThinking ? `${a.briefThinking}\n\n${item.body}` : item.body;
       recordTurnItem(turnId, { t: "text", body: item.body, ts: now });
+      if (thinkStyle) streamThink(a); // 直接流进气泡, 不等收口
       return;
     }
     if (item.kind === "text") {
       recordTurnItem(turnId, { t: "text", body: item.body, ts: now, final: item.final === true });
       a.briefLastText = item.body; // 软收口时拿它当结论 (那条路径上没有 final 标记)
+      // think-style: 非 final 文本 (中途叙述) 也追加进 <think> 流, 与 reasoning 一视同仁 ——
+      // 有没有 reasoning 都能不断把中间过程加进思考; 只有 final 文本才结束思考、成为正文。
+      if (thinkStyle && item.final !== true) {
+        a.briefThinking = a.briefThinking ? `${a.briefThinking}\n\n${item.body}` : item.body;
+        streamThink(a);
+        return;
+      }
       // final===false 才是"确知的中途输出"; undefined 是后端说不清, 不能据此提前收气泡。
       if (item.final === false) earlyLinkBubble(a);
       if (item.final === true) concludeBriefTurn(a, item.body);
