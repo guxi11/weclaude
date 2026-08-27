@@ -1042,7 +1042,13 @@ export const hasMirrorAskq = (sessionId: string): boolean => freshSlot(sessionId
 // Enter = 切换选中, 须把光标落到 N+1 行 (「下一题」行) 按 Enter 才前进; 自定义
 // 文本在第 N 行。全部题答完进提交页 (光标 0 = "1. Submit answers"), Enter 收工。
 // 序列开头 Up 连发把光标钳到 0, 吸收用户误触造成的漂移。
-export type AskqDriveAction = { kind: "keys"; keys: string[] } | { kind: "text"; text: string };
+// confirm_submit: 只用于「聊聊这个」收尾 —— 不盲发 Enter, 而是让 mirror 侧读屏
+// (capture-pane) 确认面板真的推进到 "Submit answers" 页、按 Enter、再确认面板关闭。
+// 盲发时代 (两个固定 Enter) 在光标漂移 / 文本没落下时提交不了, CLI 死等输入。
+export type AskqDriveAction =
+  | { kind: "keys"; keys: string[] }
+  | { kind: "text"; text: string }
+  | { kind: "confirm_submit" };
 
 export const buildAskqDriveActions = (questions: AskqQuestion[], picks: number[][]): AskqDriveAction[] => {
   const maxOpts = questions.reduce((m, q) => Math.max(m, q.options.length), 0);
@@ -1072,14 +1078,15 @@ export const buildAskqDriveActions = (questions: AskqQuestion[], picks: number[]
 
 // 「聊聊这个」: 光标钳 0 后落到第 N 行 (自定义文本行), 贴入引导语 — 自由文本
 // 答案本身即语义完整 (hook 若触发, deny+reason 会再覆盖成同款文案)。
-// 两个 Enter: 第一个把自定义文本确认为本题答案并前进到提交页, 第二个在提交页
-// (光标 0 = "1. Submit answers") 收工 — 与 buildAskqDriveActions 尾部同一收工 Enter。
-// 缺第二个 Enter 会停在提交页, CLI 一直等输入 (即 talk-about-this 卡住的根因)。
+// text 动作里 inject 负责 paste + 首个 Enter (确认自定义文本为本题答案、前进到
+// 提交页)。收尾不再盲发第二个 Enter —— codebuddy CLI 里自定义行必须有实际输入
+// 才能确认, 且要真正落到 "Submit answers" 页再 Enter 才结束; 盲发在光标漂移 /
+// 文本没落下时提交不了, CLI 死等输入 (talk-about-this 卡死根因)。改由 confirm_submit
+// 让 mirror 侧读屏确认已到提交页 → Enter → 确认面板关闭, 失败重试。
 export const buildAskqChatDriveActions = (q: AskqQuestion): AskqDriveAction[] => [
   { kind: "keys", keys: [...Array<string>(q.options.length + 3).fill("Up"), ...Array<string>(q.options.length).fill("Down")] },
   { kind: "text", text: "先不回答，我想和你讨论一下这个问题" },
-  { kind: "keys", keys: ["Enter"] },
-  { kind: "keys", keys: ["Enter"] },
+  { kind: "confirm_submit" },
 ];
 
 // 多问题: 逐题顺序发卡 → 收答 → 下一题。任一题选「CLI」整体转 CLI,选「聊聊」

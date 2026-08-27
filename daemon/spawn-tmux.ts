@@ -93,8 +93,7 @@ export interface RunTmuxOpts {
   timeoutMs?: number;
 }
 
-export const runTmux = (args: string[], opts: RunTmuxOpts = {}): Promise<ExecResult> =>
-  new Promise((resolve) => {
+export const runTmux = (args: string[], opts: RunTmuxOpts = {}): Promise<ExecResult> =>  new Promise((resolve) => {
     const proc = spawn("tmux", args, {
       env: { ...process.env, PATH: augmentedPath(process.env.PATH) },
       stdio: [opts.stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"],
@@ -128,6 +127,16 @@ export const runTmux = (args: string[], opts: RunTmuxOpts = {}): Promise<ExecRes
   });
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+// `tmux -V` → "tmux 3.4" / "tmux 3.2a" / "tmux next-3.4" / "tmux 1.8". Extract
+// the first major.minor as a float for coarse feature gating. Unparseable →
+// Infinity (assume modern; the flags we gate on are ancient anyway).
+const parseTmuxVersion = (out: string): number => {
+  const m = out.match(/(\d+)\.(\d+)/);
+  return m ? Number(`${m[1]}.${m[2]}`) : Number.POSITIVE_INFINITY;
+};
+export { parseTmuxVersion };
+
 
 // Single-quote shell-escape: wrap in '…' and escape embedded ' as '\''.
 const shQuote = (a: string): string => (/[\s"'`$\\]/.test(a) ? `'${a.replace(/'/g, "'\\''")}'` : a);
@@ -306,8 +315,16 @@ export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, windowName, c
   const winName = safeWindowName(windowName ?? sessionId);
 
   // Probe tmux availability up front — clearer error than a generic spawn fail.
+  // Also gate two flags on version: `-c <start-dir>` on new-session/new-window
+  // landed in tmux 1.9; `-e KEY=VAL` in 3.0. Old tmux (e.g. CentOS 7 ships 1.8)
+  // errors `unknown option -- c` and aborts the whole spawn — so when either is
+  // unsupported we fold the equivalent into the launch command instead (`cd` +
+  // inline env exports), which every tmux understands.
   const probe = await runTmux(["-V"]);
   if (!probe.ok) return { ok: false, reason: `tmux not available: ${probe.stderr.trim() || probe.code}` };
+  const ver = parseTmuxVersion(probe.stdout);
+  const supportsC = ver >= 1.9;
+  const supportsE = ver >= 3.0;
 
   // Ensure cwd / projectDir exist (tmux `new-session -c` fails if cwd missing;
   // default `~/.wezard/workspace` often hasn't been touched yet). Do NOT
@@ -337,14 +354,15 @@ export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, windowName, c
   // and the injected message falls through to a bare shell (`command not
   // found: hi`). These two legacy vars (still honored for back-compat) disable
   // the prompt regardless of the user's zstyle config.
-  const paneEnv = ["-e", "DISABLE_AUTO_UPDATE=true", "-e", "DISABLE_UPDATE_PROMPT=true"];
+  const paneEnv = supportsE ? ["-e", "DISABLE_AUTO_UPDATE=true", "-e", "DISABLE_UPDATE_PROMPT=true"] : [];
+  const cwdArg = supportsC ? ["-c", cwd] : [];
   const has = await runTmux(["has-session", "-t", tmuxName]);
   const created = has.code === 0
     // `${tmuxName}:` (trailing colon) forces session-only resolution → next free
     // window index. Bare `-t wezard` is ambiguous: if a *window* is also named
     // `wezard`, tmux matches it and tries to reuse its index → "index N in use".
-    ? await runTmux(["new-window", "-d", "-t", `${tmuxName}:`, "-n", winName, "-c", cwd, ...paneEnv, "-P", "-F", "#{pane_id}"])
-    : await runTmux(["new-session", "-d", "-s", tmuxName, "-n", winName, "-c", cwd, ...paneEnv, "-P", "-F", "#{pane_id}"]);
+    ? await runTmux(["new-window", "-d", "-t", `${tmuxName}:`, "-n", winName, ...cwdArg, ...paneEnv, "-P", "-F", "#{pane_id}"])
+    : await runTmux(["new-session", "-d", "-s", tmuxName, "-n", winName, ...cwdArg, ...paneEnv, "-P", "-F", "#{pane_id}"]);
   if (!created.ok) {
     const verb = has.code === 0 ? "new-window" : "new-session";
     return { ok: false, reason: `tmux ${verb} failed: ${created.stderr.trim() || created.code}` };
@@ -357,14 +375,21 @@ export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, windowName, c
 
   // DISABLE_AUTOUPDATER=1 防止新 pane 启动时弹出 "An update is available" 询问 ——
   // 该交互会吞掉首条 paste-buffer 注入，导致仅落字符不进入 claude 输入框。
-  const cmd = [
+  // On old tmux the pane never got the two anti-update-prompt vars via `-e`, so
+  // fold them into the command line as inline exports (`KEY=VAL cmd`).
+  const envPrefix = [
+    ...(supportsE ? [] : ["DISABLE_AUTO_UPDATE=true", "DISABLE_UPDATE_PROMPT=true"]),
     "DISABLE_AUTOUPDATER=1",
-    backend.bin,
+  ];
+  const argv = [
     ...(resumeSessionId ? ["--resume", sessionId] : ["--session-id", sessionId]),
     ...(model?.trim() ? ["--model", model.trim()] : []),
     ...cfg.wrc.extraArgs,
-  ].map((a, i) => (i === 0 ? a : shQuote(a))).join(" ");
-  const sent = await runTmux(["send-keys", "-t", tmuxPane, cmd, "Enter"]);
+  ].map(shQuote);
+  const cmd = [...envPrefix, backend.bin, ...argv].join(" ");
+  // Old tmux couldn't set the pane's start-dir via `-c`; cd into it first.
+  const launch = supportsC ? cmd : `cd ${shQuote(cwd)} && ${cmd}`;
+  const sent = await runTmux(["send-keys", "-t", tmuxPane, launch, "Enter"]);
   if (!sent.ok) {
     // Kill only this window/pane, never the shared session.
     await runTmux(["kill-pane", "-t", tmuxPane]);

@@ -28,7 +28,7 @@ import {
   projectDirsFor,
   type NormalizedTranscriptLine,
 } from "../shared/cli-backends.js";
-import { isModalPane, parseModalOptions, pickModalAnswer, type ModalPaneVerdict } from "../shared/modal-pane.js";
+import { isModalPane, isAskqSubmitPage, parseModalOptions, pickModalAnswer, type ModalPaneVerdict } from "../shared/modal-pane.js";
 import type { MirrorStore } from "./mirror-store.js";
 import { hasMirrorAskq, runMirrorAskqFlow, hasMirrorPlan, mootMirrorPlan, runMirrorPlanFlow } from "./approval.js";
 import { runTmux as runTmuxCmd, spawnTmuxClaude } from "./spawn-tmux.js";
@@ -1182,6 +1182,60 @@ const detectModalPicker = async (target: string): Promise<ModalPaneVerdict & { s
   const lines = r.stdout.replace(/\s+$/u, "").split("\n");
   const screen = lines.slice(-MODAL_SCAN_ROWS).join("\n");
   return { ...isModalPane(screen), screen };
+};
+
+// 「聊聊这个」收尾: 文本 inject 已把引导语贴进自定义文本行 (❯ N. <text>)。codebuddy
+// 的 AskUserQuestion 面板把自定义行和 Submit 行做成两个独立行, 光标此刻停在自定义
+// 行, 直接 Enter 只是在文本里换行, 提交不了。这里读屏确认 Submit 行已渲染
+// (isAskqSubmitPage) → Down 落到 Submit 行 → Enter 收工 → 确认面板关闭 (!isModalPane)。
+// 全程 bare `-p` (仅当前屏, 不碰 scrollback 里的旧面板残影)。最多重试
+// ASKQ_CONFIRM_ENTERS 次, 仍在面板里则判失败, 交回上层告警兜底。
+const ASKQ_CONFIRM_ENTERS = 3;
+const ASKQ_CONFIRM_POLL_MS = 150;
+const ASKQ_CONFIRM_STAGE_MS = 2500; // 每阶段 (到提交页 / 面板关闭) 的轮询上限
+const confirmAskqSubmit = async (
+  target: string,
+  paneAlive: () => Promise<boolean>,
+): Promise<{ ok: boolean; reason?: string }> => {
+  const capture = async (): Promise<string> => {
+    const r = await tmuxRun(["capture-pane", "-t", target, "-p"]);
+    return r.ok ? r.stdout.replace(/\s+$/u, "") : "";
+  };
+  // 轮询到 pred 为真; 期间 pane 死了立即失败。
+  const pollUntil = async (pred: (pane: string) => boolean, timeoutMs: number): Promise<boolean> => {
+    const t0 = Date.now();
+    for (;;) {
+      if (!(await paneAlive())) return false;
+      if (pred(await capture())) return true;
+      if (Date.now() - t0 >= timeoutMs) return false;
+      await sleepMs(ASKQ_CONFIRM_POLL_MS);
+    }
+  };
+  const sendKey = (key: string) => tmuxRun(["send-keys", "-t", target, key]);
+
+  for (let attempt = 0; attempt < ASKQ_CONFIRM_ENTERS; attempt++) {
+    if (!(await paneAlive())) return { ok: false, reason: "pane_dead" };
+    const cur = await capture();
+    // 面板已经不在了 = 已成功收工。
+    if (!isModalPane(cur).modal) return { ok: true };
+    // 还没出现 Submit 行则等它渲染 (文本刚落下 / TUI 重绘)。
+    if (!isAskqSubmitPage(cur) && !(await pollUntil(isAskqSubmitPage, ASKQ_CONFIRM_STAGE_MS))) {
+      // 连 Submit 行都没有 —— 可能文本没落下, 兜底按一次 Enter 试推进。
+      const e = await sendKey("Enter");
+      if (!e.ok) return { ok: false, reason: `send-keys Enter: ${e.stderr.slice(-200) || e.code}` };
+      continue;
+    }
+    // Submit 行已出现, 但光标停在自定义文本行 (❯ N. <text>) —— 面板结构是
+    // 「自定义行 + 独立 Submit 行」, 直接 Enter 只会在自定义行换行。先 Down 落到
+    // Submit 行, 再 Enter 收工。
+    const d = await sendKey("Down");
+    if (!d.ok) return { ok: false, reason: `send-keys Down: ${d.stderr.slice(-200) || d.code}` };
+    await sleepMs(ASKQ_CONFIRM_POLL_MS); // 等光标移动重绘
+    const e = await sendKey("Enter");
+    if (!e.ok) return { ok: false, reason: `send-keys Enter: ${e.stderr.slice(-200) || e.code}` };
+    if (await pollUntil((p) => !isModalPane(p).modal, ASKQ_CONFIRM_STAGE_MS)) return { ok: true };
+  }
+  return { ok: false, reason: "面板未在确认后关闭 (可能停在提交页/自定义行)" };
 };
 
 // Two fingerprints, derived from different ends of `text`:
@@ -2927,6 +2981,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
                     tmuxTarget: a.tmuxPane,
                     freshSpawn: false,
                   });
+                  if (!r.ok) return r;
+                } else if (act.kind === "confirm_submit") {
+                  // 读屏确认收尾: 到提交页 → Enter → 面板关闭, 取代盲发 Enter。
+                  const r = await confirmAskqSubmit(a.tmuxPane!, () => tmuxPaneAlive(a.tmuxPane!));
                   if (!r.ok) return r;
                 } else {
                   for (const key of act.keys) {

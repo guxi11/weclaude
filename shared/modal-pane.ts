@@ -104,6 +104,13 @@ export interface ModalAnswer {
   label: string;
 }
 
+// AskUserQuestion 提交页的判据: 选项组里出现 "Submit answers" 行。到了这一页,
+// 一个 Enter 就能收工。用最后一组编号选项 (parseModalOptions) 找它, 天然排除
+// 屏上残留的旧确认框。纯函数, 供 mirror 侧「聊聊这个」收尾读屏确认复用。
+const SUBMIT_LABEL = /submit\s+answer/iu;
+export const isAskqSubmitPage = (pane: string): boolean =>
+  parseModalOptions(pane).some((o) => SUBMIT_LABEL.test(o.label));
+
 /**
  * 从选项里挑出"一次性同意"。挑不出返回 undefined(宁可不按)。
  * `title` 缺失或不像权限确认 → 直接放弃, 避免按到 /model 之类的选择器上。
