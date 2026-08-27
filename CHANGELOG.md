@@ -4,6 +4,19 @@
 
 ## [Unreleased]
 
+## [1.2.22] - 2026-08-27
+
+### Changed
+- `mirror` think-style: **中间过程实时流进 `<think>`,不再只在收口时拼前缀**。开启 `wrc.mirror.thinkStyle` 后,本轮的 reasoning、非 final 的中途文本、以及**每一次工具调用/结果**(`🔧 Name …` / `↳ …` 摘要)都实时追加进气泡里那段 `<think>🧙 …` 流,只有 final 文本才结束思考、落成 `</think>` 之后的正文。用户一发消息气泡立刻以 `<think>🧙 #tag ` 开头(tag 塞在 `<think>` 内),看得到 Claude 正在想什么,而不是先干等一个 `…` 占位再一次性出全文。
+
+### Fixed
+- `mirror` think-style: **气泡过了 6min 编辑窗口后,累积的思考不再丢**。窗口外气泡刷不动了,改走 10s 防抖把 think 增量整段补发成一条独立 `<think>🧙 …</think>` standalone;turn 收口时冲干净残余,不漏最后一段思考。
+- `mirror` think-style: **软后端的最终正文不再重复出现一次**。软后端(如 codebuddy)的最终正文会先作为「非 final 中途文本」进过 think 流,收口再当正文用一次;收口前把 think 尾部恰好等于正文的那段剥掉(含前导 `\n\n`),保证正文只出现在 `</think>` 之后一次。
+- `inbound` 引用去重: **带引用新建 / 改投到别的 `#tag` 时,原文不再被重复注入**。去重比对的会话改成引用气泡真正的**源会话**(反解 `emoji #tag` 头得知),而非路由目标——原文天然存在于源的 transcript,与你把它投到哪个 tag 无关;源未知(用户自打的引用)才回退按目标查。
+- `inbound` 引用去重: **引用一个 `🔧 Grep …` 工具气泡不再误判为「不在上下文」而重复注入**。末轮 transcript 的扁平化文本现在也纳入 `tool_use` / `tool_result`(工具名+入参、结果文本),与出站工具气泡的 `🔧 <Name> <input>` / `↳ <result>` 渲染对齐,子串比对才能命中。
+- `session-label` `parseTagHeader`: **think-style 气泡被引用时能正确反解出 tag 头**。tag 头此时塞在 `<think>` 内(`<think>🦊 #fix …</think>\n\n正文`),微信引用时 `<think>` 标记有时保留有时被渲染剥掉;现在先剥掉可能存在的起始 `<think>` 再认头,body 保留 think+正文全文(仅去 `<think>`/`</think>` 标记杂质),`canonContains` 子串比对必然命中。
+- `approval` 「聊聊这个」: **补第二个 Enter,talk-about-this 不再卡在提交页**。自定义文本确认为本题答案后前进到提交页,还需再一个 Enter 在提交页(光标 0 = `1. Submit answers`)收工;缺它 CLI 会一直等输入。
+
 ## [1.2.21] - 2026-08-25
 
 ### Fixed

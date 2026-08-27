@@ -7,7 +7,7 @@ import type { Logger } from "pino";
 import type { Config } from "../shared/config.js";
 import type { Bridge } from "./cc-bridge.js";
 import type { MirrorBridge } from "./mirror-bridge.js";
-import { tailTurns, renderPeerMentionHint, type PeerInfo, type PeerMention } from "./peers.js";
+import { tailTurnsWithTools, renderPeerMentionHint, type PeerInfo, type PeerMention } from "./peers.js";
 import { expandHome, sanitizeId } from "../shared/paths.js";
 import type { CliBackendName } from "../shared/cli-backends.js";
 import { tryConsumeClaim, persistClaim, ackClaim, shouldAutoClaim, ackAutoClaim } from "./claim.js";
@@ -390,11 +390,16 @@ const isLastResponseQuote = (target: string, quoted: string): boolean =>
 // 带 `emoji #tag` 头 (withTagHeader),所以引用文本自带路由信息;用户自己发的
 // 行首 `#fix 干活` 同样算数(限行首,否则正文里随手写的 #123 会误判)。
 // `body` 是剥掉头/tag 后的净引用内容,用于跟目标 context 比对。
-const parseQuote = (q: QuoteContent | undefined): { tag: string; body: string } | null => {
+// `tag`   = 路由目标(引用继承的投递 tag)。
+// `srcTag` = 引用气泡真正出自哪个会话 —— 仅 bot 气泡可知(反解 `emoji #tag` 头)。
+//            去重要比对的是「内容在不在源会话」,而非路由目标: 带着引用新建 /
+//            改投到别的 tag 时,目标会话是空的,只有源会话里才有那段原文。
+//            `srcTag===undefined` 表示源未知(用户自己打的引用),回退到按目标查。
+const parseQuote = (q: QuoteContent | undefined): { tag: string; srcTag?: string; body: string } | null => {
   const raw = q ? quoteToText(q).trim() : "";
   if (!raw) return null;
   const head = parseTagHeader(raw);
-  if (head.fromBot) return { tag: head.tag, body: head.body };
+  if (head.fromBot) return { tag: head.tag, srcTag: head.tag, body: head.body };
   const m = TAG_RE.exec(raw);
   return m && m.index === 0 ? { tag: m[2] ?? "", body: parseTag(raw).cleaned } : { tag: "", body: raw };
 };
@@ -415,8 +420,12 @@ const composeInbound = (
   const { tag: typed, cleaned } = parseTag(rawBody);
   const q = parseQuote(msg.quote);
   const tag = typed || q?.tag || "";
+  // 去重比对的会话: 若引用来自某个 bot 会话(srcTag 已知),查那个源会话 ——
+  // 内容天然存在于源的 transcript, 与你把它投到哪个 tag 无关。源未知时(用户自打
+  // 的引用 / 改投)回退到路由目标。这修掉了「带引用新建/改投会话时原文被重复注入」。
+  const dedupTag = q?.srcTag ?? tag;
   // 剥完头什么都不剩(折叠气泡这类纯 chrome 的引用)⇒ 没有可搬运的内容,只留路由。
-  const consumed = !q || !q.body.trim() || inContext(sessionKey(chatPrincipal(msg), tag), q.body);
+  const consumed = !q || !q.body.trim() || inContext(sessionKey(chatPrincipal(msg), dedupTag), q.body);
   if (cleaned.trim()) {
     return { text: consumed ? cleaned : `${renderQuotePrefix(q.body)}${cleaned}`, tag, promoted: false };
   }
@@ -875,7 +884,9 @@ export const installInboundRouter = (
       .status?.().mirrors ?? [];
     const jsonl = mirrors.find((m) => m.target === target)?.jsonlPath;
     if (!jsonl) return false;
-    return canonContains(tailTurns(jsonl, QUOTE_TAIL_TURNS).map((t) => t.text).join("\n"), quoted);
+    // Include tool_use/tool_result text: a quoted `🔧 Grep …` bubble carries
+    // tool tokens that text-only tail matching misses → dup re-inject.
+    return canonContains(tailTurnsWithTools(jsonl, QUOTE_TAIL_TURNS), quoted);
   };
 
   // 路由用掉的那个 `#tag` 已被 parseTag 摘走,正文里剩下的每个 `#x` 都可能是

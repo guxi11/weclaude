@@ -86,6 +86,56 @@ export const tailTurns = (jsonlPath: string, n = 3): Turn[] => {
   return turns.slice(-n);
 };
 
+// Flatten a message's content for QUOTE DEDUP only — unlike `blockText` this
+// also lifts `tool_use` (name + stringified input) and `tool_result` text.
+// Outbound tool bubbles render as `🔧 <Name> <input>` / `↳ <result>`, so a
+// user quoting one carries tool tokens that plain text-only extraction can't
+// match — the dedup then wrongly re-injects the quote (observed dup bug).
+const blockTextWithTools = (content: unknown): string => {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((b): string => {
+      const t = (b as { type?: string })?.type;
+      if (t === "text") return (b as { text?: string }).text ?? "";
+      if (t === "tool_use") {
+        const c = b as { name?: string; input?: unknown };
+        return `${c.name ?? ""} ${typeof c.input === "string" ? c.input : JSON.stringify(c.input ?? "")}`;
+      }
+      if (t === "tool_result") {
+        const c = (b as { content?: unknown }).content;
+        return typeof c === "string" ? c : blockText(c);
+      }
+      return "";
+    })
+    .filter(Boolean)
+    .join(" ");
+};
+
+/** Like `tailTurns` but the flattened text includes tool_use/tool_result
+ *  content — the dedup-only reader so quoted tool bubbles match context. */
+export const tailTurnsWithTools = (jsonlPath: string, n = 3): string => {
+  const raw = readTail(jsonlPath);
+  if (!raw) return "";
+  const normalize = backendForPath(jsonlPath).normalizeTranscriptLine;
+  return raw
+    .split("\n")
+    .filter((l) => l.trim())
+    .flatMap((line) => {
+      let parsed: unknown;
+      try { parsed = JSON.parse(line); } catch { return []; }
+      let row;
+      try { row = normalize(parsed); } catch { return []; }
+      if (!row || row.isMeta || row.isSidechain) return [];
+      const role = row.message?.role;
+      if (role !== "user" && role !== "assistant") return [];
+      const text = blockTextWithTools(row.message?.content).replace(META_RE, "").replace(/\s+/g, " ").trim();
+      return text ? [text] : [];
+    })
+    .slice(-n)
+    .join("\n");
+};
+
 // Transcript prose is arbitrary text: backticks / asterisks / pipes lifted out of
 // it render as chips and table cells inside a WeCom bubble, shredding the line
 // layout. A preview is plain text — flatten every markdown-active char.

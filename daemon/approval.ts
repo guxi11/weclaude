@@ -1070,11 +1070,15 @@ export const buildAskqDriveActions = (questions: AskqQuestion[], picks: number[]
   return acts;
 };
 
-// 「聊聊这个」: 光标钳 0 后落到第 N 行 (自定义文本行), 贴入引导语提交 — 自由文本
+// 「聊聊这个」: 光标钳 0 后落到第 N 行 (自定义文本行), 贴入引导语 — 自由文本
 // 答案本身即语义完整 (hook 若触发, deny+reason 会再覆盖成同款文案)。
+// 两个 Enter: 第一个把自定义文本确认为本题答案并前进到提交页, 第二个在提交页
+// (光标 0 = "1. Submit answers") 收工 — 与 buildAskqDriveActions 尾部同一收工 Enter。
+// 缺第二个 Enter 会停在提交页, CLI 一直等输入 (即 talk-about-this 卡住的根因)。
 export const buildAskqChatDriveActions = (q: AskqQuestion): AskqDriveAction[] => [
   { kind: "keys", keys: [...Array<string>(q.options.length + 3).fill("Up"), ...Array<string>(q.options.length).fill("Down")] },
   { kind: "text", text: "先不回答，我想和你讨论一下这个问题" },
+  { kind: "keys", keys: ["Enter"] },
   { kind: "keys", keys: ["Enter"] },
 ];
 
