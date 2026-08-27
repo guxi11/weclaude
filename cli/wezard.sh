@@ -89,6 +89,31 @@ probe()     { curl -sS --noproxy '*' --connect-timeout 1 --max-time 1 "$DAEMON_B
 wait_up()   { for _ in $(seq 1 30); do probe && return 0; sleep 0.3; done; return 1; }
 wait_down() { for _ in $(seq 1 30); do probe || return 0; sleep 0.3; done; return 1; }
 
+# Nohup fallback for Linux boxes with no systemd user session (containers, CI,
+# minimal images where D-Bus is unreachable). Detached background node process,
+# pidfile-tracked so svc_unregister can find it again. augmentedPath isn't
+# needed here — the CLI itself already runs with the user's interactive PATH.
+PIDFILE="$HOME_DIR/.wezard/daemon.pid"
+DAEMON_ENTRY="$REPO_ROOT/dist/daemon/index.js"
+nohup_start() {
+  [[ -f "$DAEMON_ENTRY" ]] || { echo "[wezard] missing $DAEMON_ENTRY — run 'npm run build'" >&2; return 1; }
+  mkdir -p "$HOME_DIR/.wezard"
+  nohup "$(command -v node)" "$DAEMON_ENTRY" \
+    >> "$HOME_DIR/.wezard/daemon.stdout.log" \
+    2>> "$HOME_DIR/.wezard/daemon.stderr.log" &
+  echo $! > "$PIDFILE"
+}
+nohup_stop() {
+  [[ -f "$PIDFILE" ]] || return 0
+  local pid; pid="$(cat "$PIDFILE" 2>/dev/null)"
+  [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+  rm -f "$PIDFILE"
+}
+# True when a usable systemd --user session is reachable. `systemctl --user`
+# returns "Failed to get D-Bus connection" (exit≠0) in containers; probing it
+# once lets every lifecycle command pick systemd-vs-nohup consistently.
+have_systemd_user() { command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; }
+
 # idempotent converge-to-running: kick if already bootstrapped, else bootstrap,
 # else legacy load — then assert it actually bound.
 ensure_up() {
@@ -97,7 +122,17 @@ ensure_up() {
       launchctl kickstart -k "gui/$(id -u)/${LABEL}" 2>/dev/null \
         || launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null \
         || launchctl load -w "$PLIST" 2>/dev/null || true ;;
-    Linux) systemctl --user restart wezard.service ;;
+    Linux)
+      # Prefer systemd when it's actually there; otherwise fall back to a
+      # detached node process. reload/restart already ran graceful_stop, but a
+      # stale nohup pid may still be around — clear it before relaunching.
+      if have_systemd_user; then
+        systemctl --user restart wezard.service 2>/dev/null || { echo "[wezard] systemctl --user restart failed" >&2; return 1; }
+      else
+        echo "[wezard] no systemd user session (container?) — starting daemon via nohup" >&2
+        nohup_stop
+        nohup_start || return 1
+      fi ;;
   esac
   wait_up
 }
@@ -112,7 +147,9 @@ svc_unregister() {
   case "$OS" in
     Darwin) launchctl bootout "gui/$(id -u)/${LABEL}" 2>/dev/null \
               || launchctl unload "$PLIST" 2>/dev/null || true ;;
-    Linux)  systemctl --user stop wezard.service ;;
+    Linux)
+      if have_systemd_user; then systemctl --user stop wezard.service 2>/dev/null || true
+      else nohup_stop; fi ;;
   esac
 }
 
@@ -163,6 +200,16 @@ case "$cmd" in
   logs)
     log_path=$(http_get /status 2>/dev/null | jq -r '.logFile // empty' 2>/dev/null || true)
     log_path="${log_path:-$HOME_DIR/.wezard/daemon.log}"
+    # On the nohup fallback path there's no daemon.log — stdout/stderr go to
+    # separate files. Prefer whichever actually exists so `logs` isn't empty.
+    if [[ ! -f "$log_path" && -f "$HOME_DIR/.wezard/daemon.stderr.log" ]]; then
+      log_path="$HOME_DIR/.wezard/daemon.stderr.log"
+    fi
+    if [[ ! -f "$log_path" ]]; then
+      echo "[wezard] daemon has never started — no log file at $log_path" >&2
+      echo "[wezard] start it with 'wezard start' (or 'wezard reload')" >&2
+      exit 1
+    fi
     if [[ "${1:-}" == "-f" ]]; then tail -f "$log_path"; else tail -n 100 "$log_path"; fi
     ;;
   config-path) http_get /status | jq -r '.sourcePath // empty' ;;
