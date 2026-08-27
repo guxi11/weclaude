@@ -1321,12 +1321,22 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
 
   let pasteSeen = await sawHead(PASTE_VERIFY_MS);
   if (!pasteSeen) {
-    // Paste fired before the TUI was reading — re-paste once after a back-off.
-    log.warn({ target, headFp }, "mirror inject: paste headFp not seen, re-pasting");
-    await sleepMs(RETRY_SETTLE_MS);
-    r = await loadAndPaste();
-    if (!r.ok) return r;
-    pasteSeen = await sawHead(PASTE_VERIFY_MS);
+    // headFp not seen — but on a cold fresh-spawn the TUI can render the paste
+    // just outside our capture window / after our budget, so `sawHead` yields a
+    // FALSE negative even though the text is sitting in the input box. Blindly
+    // re-pasting then stacks a SECOND copy → the classic doubled prompt. Guard:
+    // re-paste only if the box genuinely lacks our tail; otherwise the first
+    // paste landed and we just proceed to submit.
+    if (await inputBoxStillHasTail()) {
+      log.warn({ target, headFp }, "mirror inject: headFp not seen but tail present in box — first paste landed, skipping re-paste");
+      pasteSeen = true;
+    } else {
+      log.warn({ target, headFp }, "mirror inject: paste headFp not seen, re-pasting");
+      await sleepMs(RETRY_SETTLE_MS);
+      r = await loadAndPaste();
+      if (!r.ok) return r;
+      pasteSeen = await sawHead(PASTE_VERIFY_MS);
+    }
   }
 
   // Bracketed-paste end + TUI catch-up. Warm pane: 400ms is invisible.
