@@ -16,6 +16,35 @@ esac
 
 [[ -x "$NODE" ]] || { echo "node not found in PATH"; exit 1; }
 
+# Pre-flight: the PreToolUse hook (hooks/pre-tool-use.sh) requires jq to parse
+# the tool-call payload. Without it the hook silently degrades to a local `ask`
+# and approval cards never reach WeCom. Install it here on fresh boxes.
+if ! command -v jq >/dev/null 2>&1; then
+  echo "[install] jq not found — attempting to install..."
+  if command -v apt-get >/dev/null 2>&1; then
+    sudo apt-get update -y >/dev/null 2>&1; sudo apt-get install -y jq
+  elif command -v yum >/dev/null 2>&1; then
+    sudo yum install -y jq
+  elif command -v dnf >/dev/null 2>&1; then
+    sudo dnf install -y jq
+  elif command -v apk >/dev/null 2>&1; then
+    sudo apk add jq
+  elif command -v brew >/dev/null 2>&1; then
+    brew install jq
+  fi
+  if command -v jq >/dev/null 2>&1; then
+    echo "[install] jq installed: $(command -v jq)"
+  else
+    echo "[install] ERROR: could not install jq automatically." >&2
+    echo "  Install it manually, then re-run install:" >&2
+    echo "    Debian/Ubuntu: sudo apt-get install -y jq" >&2
+    echo "    RHEL/CentOS:   sudo yum install -y jq" >&2
+    echo "    Alpine:        sudo apk add jq" >&2
+    echo "    macOS:         brew install jq" >&2
+    exit 1
+  fi
+fi
+
 # Build if missing
 if [[ ! -f "$REPO/$ENTRY" ]]; then
   echo "[install] building..."

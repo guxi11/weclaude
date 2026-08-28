@@ -2,6 +2,7 @@
 // (e.g. ~/.claude/settings.json so claude-internal wrappers pick them up).
 // Idempotent + reversible via per-target lock manifest in ~/.wezard/sync.lock.json.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { dirname, resolve as pathResolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseJsonc } from "jsonc-parser";
@@ -143,6 +144,29 @@ const stripEnv = (settings: Record<string, unknown>): void => {
   for (const k of [...ENV_KEYS, ...LEGACY_ENV_KEYS]) delete env[k];
 };
 
+// ── Pre-flight: jq is required by hooks/pre-tool-use.sh ──────────────
+// The hook hard-falls back to a local `ask` when jq is missing, which means
+// approval cards never reach WeCom — silent, confusing failure on fresh
+// installs. Catch it here at registration time with install instructions.
+const requireJq = (): void => {
+  const r = spawnSync("jq", ["--version"], { stdio: "ignore" });
+  if (r.status === 0) return;
+  const install = (() => {
+    switch (process.platform) {
+      case "darwin": return "brew install jq";
+      case "linux": return "sudo apt-get install -y jq   # or: sudo yum install -y jq / sudo apk add jq";
+      default: return "install jq for your platform";
+    }
+  })();
+  // eslint-disable-next-line no-console
+  console.error(
+    `\n[wezard-sync] ERROR: 'jq' is required by the PreToolUse hook but not found on PATH.\n` +
+    `  Approval cards will NOT be delivered until it is installed.\n` +
+    `  Install it, then re-run sync:\n    ${install}\n`,
+  );
+  process.exit(1);
+};
+
 // ── Drivers ───────────────────────────────────────────────────────────
 const targetKey = (path: string): string => expandHome(path);
 
@@ -207,6 +231,7 @@ const main = (): void => {
   const dryRun = argv.includes("--dry-run");
 
   const { config: cfg } = loadConfig();
+  requireJq();
   const targets = cfg.sync.targets;
   if (targets.length === 0) {
     // eslint-disable-next-line no-console

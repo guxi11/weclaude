@@ -60,7 +60,7 @@ bridge_down() {
 }
 
 PAYLOAD=$(cat) || ask "stdin read failed"
-command -v jq >/dev/null 2>&1 || ask "jq missing"
+command -v jq >/dev/null 2>&1 || ask "jq not installed — approval cards disabled; run: apt-get install jq (or yum/apk/brew) then reload"
 
 SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // empty')
 TOOL_NAME=$(printf '%s' "$PAYLOAD" | jq -r '.tool_name // empty')
