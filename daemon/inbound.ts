@@ -370,16 +370,28 @@ const renderQuotePrefix = (body: string): string => {
 // any punctuation/whitespace/markup churn while keeping content fidelity.
 const canonForCompare = (s: string): string => s.replace(/[^\p{L}\p{N}]/gu, "");
 
-/** `haystack` 里是否已包含 `needle`(两边都归一化后的子串匹配)。 */
+/** `haystack` 里是否已包含 `needle` 的实质内容。
+ *  两边归一化后,从 needle 里等间距抽 N 段 chunk,超过阈值命中即判"已在上下文"。
+ *  比整串 substring 更健壮: WeCom 引用气泡可能截断、折叠、加 [查看更多]、重排段落,
+ *  全文子串匹配在任何一处断裂就 miss。分段采样只要大部分 chunk 命中就够。 */
+const CHUNK_LEN = 32;  // 每段采样长度(canon'd 字符)
+const CHUNK_COUNT = 5; // 采样段数
+const CHUNK_THRESHOLD = 0.6; // 命中比例阈值
+
 const canonContains = (haystack: string, needle: string): boolean => {
   const a = canonForCompare(haystack);
   const b = canonForCompare(needle);
-  if (a.length < 4 || b.length < 6) return false; // too short — false-positive risk
-  // Substring match (prefix subsumes; suffix covers tool-heavy turns where the
-  // tracked `s.acc` interleaves tool entries before the final text). Both
-  // sides are canon'd to letters+digits only, so formatting/punctuation drift
-  // can't break the match.
-  return a.includes(b);
+  if (a.length < 4 || b.length < 6) return false;
+  // Fast path: short needle — full substring is cheap and precise
+  if (b.length <= CHUNK_LEN * 2) return a.includes(b);
+  // Sampled-chunk match: pick evenly-spaced chunks from needle, check presence
+  const step = Math.max(1, Math.floor((b.length - CHUNK_LEN) / (CHUNK_COUNT - 1)));
+  let hits = 0;
+  let total = 0;
+  for (let i = 0; i <= b.length - CHUNK_LEN && total < CHUNK_COUNT; i += step, total++) {
+    if (a.includes(b.slice(i, i + CHUNK_LEN))) hits++;
+  }
+  return total > 0 && hits / total >= CHUNK_THRESHOLD;
 };
 
 const isLastResponseQuote = (target: string, quoted: string): boolean =>
@@ -879,14 +891,21 @@ export const installInboundRouter = (
   // —— 引用的往往是几轮之前的气泡,只比对最后一条会漏。目标未挂载(尚未 attach /
   // headless)时读不到 transcript,退化成"保留引用",宁可多给上下文。
   const quoteInContext = (target: string, quoted: string): boolean => {
-    if (isLastResponseQuote(baseOfKey(target), quoted)) return true;
+    if (isLastResponseQuote(baseOfKey(target), quoted)) {
+      log.info({ target, reason: "lastResponse" }, "quoteInContext: hit");
+      return true;
+    }
     const mirrors = (bridge as { status?: () => { mirrors?: Array<{ target: string; jsonlPath: string }> } })
       .status?.().mirrors ?? [];
     const jsonl = mirrors.find((m) => m.target === target)?.jsonlPath;
-    if (!jsonl) return false;
-    // Include tool_use/tool_result text: a quoted `🔧 Grep …` bubble carries
-    // tool tokens that text-only tail matching misses → dup re-inject.
-    return canonContains(tailTurnsWithTools(jsonl, QUOTE_TAIL_TURNS), quoted);
+    if (!jsonl) {
+      log.info({ target, mirrorCount: mirrors.length, mirrorTargets: mirrors.map((m) => m.target) }, "quoteInContext: no jsonl for target");
+      return false;
+    }
+    const tail = tailTurnsWithTools(jsonl, QUOTE_TAIL_TURNS);
+    const hit = canonContains(tail, quoted);
+    log.info({ target, jsonl, tailLen: tail.length, quotedLen: quoted.length, hit }, "quoteInContext: tail check");
+    return hit;
   };
 
   // 路由用掉的那个 `#tag` 已被 parseTag 摘走,正文里剩下的每个 `#x` 都可能是

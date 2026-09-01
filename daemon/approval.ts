@@ -1235,8 +1235,6 @@ export const runMirrorAskqFlow = async ({ log, client, sessionId, chatKey, toolI
   // 驱动成功 = 面板已按 WeCom 答案提交, 结果随工具自然落地。清槽放掉后续提问;
   // hook 若迟到, 无槽 → allow → 本地 (即我们驱动的) 答案原样生效, 语义一致。
   mirrorAskqSlots.delete(sessionId);
-  // 回执同 hook 流: 答完后 model 进入不可见长 thinking, 先确认答案已落地。
-  await note(total === 1 ? "✅ 已回传，Claude 处理中…" : `✅ ${total} 题已回传，Claude 处理中…`);
 };
 
 // ── mirror 驱动 plan 审批卡 (codebuddy 的 ExitPlanMode 完全不过 hook) ──────
@@ -1481,24 +1479,6 @@ const handleAskUserQuestion = async ({ cfg, log, client, body, getMirrorTarget, 
   const reason = total === 1
     ? `User answered ${answers[0]} via WeCom`
     : `User answered ${total} questions via WeCom — ${answers.join("; ")}`;
-  // 答完最后一题后 model 进入不可见的长 thinking (隐藏式 thinking 不下发,
-  // WeCom 端全静默,极易被当成"卡住")。推一条回执确认答案已落地。失败不阻断。
-  // 客户端已断开时回执是谎言 (答案送不回去了), 跳过。
-  if (!gone) {
-    try {
-      await client.sendMessage(target, {
-        msgtype: "markdown",
-        markdown: {
-          content: withTagHeader(
-            approver,
-            total === 1 ? "✅ 已回传，Claude 处理中…" : `✅ ${total} 题已回传，Claude 处理中…`,
-          ),
-        },
-      });
-    } catch (e) {
-      log.warn({ err: (e as Error).message }, "askq ack send failed");
-    }
-  }
   return { decision: "deny", reason };
 };
 

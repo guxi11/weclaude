@@ -514,6 +514,17 @@ const stripTrailingBody = (think: string | undefined, body: string): string | un
   return think;
 };
 
+// thinkStyle 兜底: turn 收口时无正式 body, 从累积的 thinking 里摘出最后一段
+// 看起来像正文的内容当作 body 下发。工具调用行 (🔧) 和工具结果行 (↳) 跳过。
+const rescueBodyFromThinking = (thinking: string): string | undefined => {
+  const paragraphs = thinking.split(/\n\n/).map(s => s.trim()).filter((s): s is string => s.length > 0);
+  for (let i = paragraphs.length - 1; i >= 0; i--) {
+    const p = paragraphs[i]!;
+    if (!p.startsWith("🔧 ") && !p.startsWith("↳ ")) return p;
+  }
+  return undefined;
+};
+
 // WeCom's markdown sanitizer strips HTML-like `<...>` runs even inside inline
 // code spans — so a Bash command containing `<<'EOF'` (heredoc), `<file>`,
 // `<noreply@x>` etc. silently swallows the rest of the line plus the closing
@@ -716,7 +727,7 @@ const renderLine = (raw: string, deps: TailDeps): RenderItem[] => {
         flushPending();
         const t = b.text.trim();
         if (t && !deps.isOwnAssistantSend?.(t)) out.push({ kind: "text", body: t, final: textFinal });
-      } else if (b?.type === "tool_use" && deps.includeTools) {
+      } else if (b?.type === "tool_use" && (deps.includeTools || deps.thinkStyle)) {
         const name = b.name ?? "tool";
         const toolUseId = b.id ?? "";
         // 同名扩展当前 group; 不同名先 flush 再起新组。
@@ -1850,6 +1861,8 @@ interface AttachState {
   briefThinking?: string;
   /** 软收口的静默期计时器 —— 任何新 item 到达即撤销。 */
   softEnd?: NodeJS.Timeout;
+  /** thinkStyle 兜底: turn 超时未 conclude → 强制软收口, 从 thinking 捞正文。 */
+  thinkRescueTimer?: NodeJS.Timeout;
   /** CLI 侧最近一条用户输入, 用作下一个"无气泡 turn"(ensureBriefTurn) 的 userQuery。
    *  WeCom 发起的 turn 直接从 dispatch 拿到原文, 用不到它。 */
   pendingBriefQuery?: string;
@@ -1997,6 +2010,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const SOFT_TURN_END_MS = 4_000;
   const STREAM_SOFT_CAP = 18_000;
   const TOOL_DETAIL_TTL_MS = 24 * 60 * 60 * 1000;
+  /** thinkStyle 兜底超时: turn 开始 2min 后仍未 conclude → 强制软收口。
+   *  比 HARD_TIMEOUT_MS (350s) 短, 气泡还活着时走 finishBriefBubble 路径。 */
+  const THINK_RESCUE_TIMEOUT_MS = 120_000;
 
   // turnId → { tools, target, expiresAt } registry for click-to-detail lookups.
   interface TurnRecord {
@@ -2444,6 +2460,15 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.briefConcluded = false;
     a.briefLastText = undefined;
     a.briefThinking = undefined;
+    if (a.thinkRescueTimer) { clearTimeout(a.thinkRescueTimer); a.thinkRescueTimer = undefined; }
+    if (thinkStyle) {
+      a.thinkRescueTimer = setTimeout(() => {
+        if (a.briefTurnId === q.turnId && !a.briefConcluded) {
+          log.warn({ sessionId: a.sessionId, turnId: q.turnId }, "brief: thinkStyle rescue timeout — forcing close");
+          closeBriefTurn(a, true);
+        }
+      }, THINK_RESCUE_TIMEOUT_MS);
+    }
     log.info({ sessionId: a.sessionId, turnId: q.turnId, isSlash: q.isSlash }, "brief: turn started");
   };
 
@@ -2481,10 +2506,15 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         log.warn({ sessionId: a.sessionId, turnId }, "brief: queued turn timed out — force-closing the stuck one");
         closeBriefTurn(a);
       }
-      // think-style: 到点也不发链接, 有累积 thinking 就收进气泡 (tag 在 <think> 内), 否则空收。
+      // think-style: WeCom ~6min stream 窗口快到, 必须 finish=true 收口。
+      // 保留当前已流进气泡的 thinking 内容作为最终快照 (用户看到的内容不变),
+      // 后续正文走 standalone。如果 turn 尚未结论, 标记 done 让 concludeBriefTurn
+      // 知道气泡已收口、走 else 分支 (sendRaw / sendStandalone)。
       if (thinkStyle) {
-        const think = a.briefThinking?.trim();
-        void finishBubble(a, bubble, think ? `${openThink(a.target, think)}</think>` : withSessionTag(a.target, " "), true);
+        // 活跃 turn 的 thinking 才是本气泡的内容; 排队 turn 没有 thinking, 空收即可。
+        const think = (a.briefBubble === bubble) ? a.briefThinking?.trim() : undefined;
+        const content = think ? openThink(a.target, think) : withSessionTag(a.target, " ");
+        void finishBubble(a, bubble, content, true);
       } else {
         void finishBubble(a, bubble, briefDetailLink(turnId, a.target), true);
       }
@@ -2591,13 +2621,30 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const closeBriefTurn = (a: AttachState, soft = false): void => {
     if (!a.briefTurnId) return;
     if (soft) concludeBriefTurn(a, a.briefLastText ?? "");
+    // ──── thinkStyle 兜底: turn 将收口但 concludeBriefTurn 未生效 ────
+    // 正常路径 (final===true / 软收口 + briefLastText) 上面已经 conclude 过了;
+    // 这里只处理"有 thinking 但正文为空"的漏网之鱼: 从 briefThinking 尾部摘出最后
+    // 一段非工具行当作正文, 再试一次 conclude。保证 thinking 内容不被静默丢弃。
+    if (thinkStyle && !a.briefConcluded && a.briefThinking) {
+      const rescued = rescueBodyFromThinking(a.briefThinking);
+      if (rescued) {
+        log.info({ sessionId: a.sessionId, turnId: a.briefTurnId }, "brief: thinkStyle rescue — concluding with last text from thinking");
+        concludeBriefTurn(a, rescued);
+      }
+    }
     // 气泡还开着 (有工具的 turn: 结论只发了 standalone, 气泡留到这里收链接; 或空 turn
     // 没有结论) —— 收口: 统一写详情链接, 保证每个 turn 都有可点入口。
     if (a.briefBubble && !a.briefBubble.done) {
       if (thinkStyle) {
-        // think-style: 不发链接。有累积 thinking 就收进气泡 (tag 在 <think> 内), 否则空收。
-        const think = a.briefThinking?.trim();
-        void finishBriefBubble(a, think ? `${openThink(a.target, think)}</think>` : withSessionTag(a.target, " "), true);
+        // 已结论 → 气泡已在 concludeBriefTurn 的 else 分支通过 sendRaw 发出
+        //   think+body 整条消息，这里只需收掉气泡（避免重复下发）。
+        // 未结论 → 不发纯 think 孤消息。streamThink 已提供实时预览，
+        //   标记 done 阻止后续 streamThink，等 concludeBriefTurn 合并下发。
+        if (a.briefConcluded) {
+          void finishBriefBubble(a, withSessionTag(a.target, " "), true);
+        } else {
+          a.briefBubble.done = true;
+        }
       } else {
         void finishBriefBubble(a, briefDetailLink(a.briefTurnId, a.target), true);
       }
@@ -2611,6 +2658,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.briefConcluded = false;
     a.briefLastText = undefined;
     a.briefThinking = undefined;
+    if (a.thinkRescueTimer) { clearTimeout(a.thinkRescueTimer); a.thinkRescueTimer = undefined; }
     // 放行下一个排队的 turn —— 它的气泡早在 ack 时就挂出去了, 这里只是激活。
     const next = a.briefQueue?.shift();
     if (next) openBriefTurn(a, next);
@@ -2718,10 +2766,15 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           ts: now,
         });
       }
-      // think-style: 工具调用也算中间过程, 以 `🔧 Name compact` 摘要进 think。
+      // think-style: 工具调用也算中间过程, 以 `🔧 [Name compact](url)` 摘要进 think,
+      // 复用 tool call detail url, 让 think 内容里的工具调用也可点开独立详情。
       if (thinkStyle) {
         const lines = item.calls
-          .map((c) => `🔧 ${c.name} ${renderToolInputCompact(c.input, cfg.wrc.mirror.toolUseInlineMaxChars)}`.trim())
+          .map((c) => {
+            const compact = safeForMarkdown(renderToolInputCompact(c.input, cfg.wrc.mirror.toolUseInlineMaxChars));
+            const url = detailUrlFor(c.toolUseId, a.target);
+            return url ? `🔧 [${c.name} ${compact}](${url})` : `🔧 ${c.name} ${compact}`;
+          })
           .join("\n");
         pushThink(a, lines);
       }
@@ -2742,13 +2795,22 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     }
     if (item.kind === "text") {
       recordTurnItem(turnId, { t: "text", body: item.body, ts: now, final: item.final === true });
-      a.briefLastText = item.body; // 软收口时拿它当结论 (那条路径上没有 final 标记)
-      // think-style: 非 final 文本 (中途叙述) 也进 think 流, 与 reasoning / 工具一视同仁 ——
-      // 只有 final 文本结束思考、成为正文。
-      if (thinkStyle && item.final !== true) {
+      // think-style: 确知的中途输出 (final===false) 只进 think 流, 不算结论;
+      // 软后端的不确定态 (final===undefined) 也 pushThink, 但同时写 briefLastText
+      // —— 软收口路径 (closeBriefTurn soft=true) 拿 briefLastText 当正文传给
+      // concludeBriefTurn, 那里 stripTrailingBody 会把 think 尾部的重复段摘掉。
+      // 旧逻辑 undefined 一律 return 导致 briefLastText 永远为空, 软收口拿到 ""
+      // 直接 bail → 正文留在 think 里出不来。
+      if (thinkStyle && item.final === false) {
         pushThink(a, item.body);
         return;
       }
+      if (thinkStyle && item.final === undefined) {
+        pushThink(a, item.body);
+        a.briefLastText = item.body;
+        return;
+      }
+      a.briefLastText = item.body; // 软收口时拿它当结论 (那条路径上没有 final 标记)
       // final===false 才是"确知的中途输出"; undefined 是后端说不清, 不能据此提前收气泡。
       if (item.final === false) earlyLinkBubble(a);
       if (item.final === true) concludeBriefTurn(a, item.body);
@@ -4542,18 +4604,13 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       }
       // freshSpawn: true — the pane was just minted by /mirror/spawn, the TUI
       // is still warming up so the verifier in injectViaTmux needs the slack.
+      // 同 dispatch: 在 inject 之前解除静默, 防止验证循环中 LLM 回复被永久吞掉。
+      a.muteUntilInject = false;
+      a.justSpawned = false;
       const r = await inject({
         text, images: [], cfg, log: log.child({ principal: target, sessionId: sid, sub: "init-demo" }),
         sessionId: sid, jsonlPath: a.jsonlPath, tmuxTarget: a.tmuxPane, freshSpawn: true,
       });
-      // 与 dispatch 同一约定: 首条 inject 落地 = 解除新 pane 的初始输出静默。
-      // 漏掉这一步的后果不只是少几条气泡 —— onItem 在 mute 分支整体早退, 连
-      // recordTurnStart 都不会跑, 于是 graph/send_peer 拉起来的节点在 chat 列表
-      // 和 chat 详情里彻底不存在(它从来没被 WeCom 侧 dispatch 过, 没有第二次机会)。
-      if (r.ok) {
-        a.muteUntilInject = false;
-        a.justSpawned = false;
-      }
       return r;
     },
     interruptPane: async (target, opts) => {
@@ -4916,12 +4973,18 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           return;
         }
         rememberInject(text);
+        // 解除静默必须在 inject 之前: inject 内部的 freshSpawn 验证循环可达 10+s
+        // (paste-verify + settle + waitForCleared + retry), 而 LLM 的回复可能在 Enter
+        // 发出后 2-3s 就落盘 —— tail 在 mute 期间读到的 item 会被 onItem 永久丢弃,
+        // 导致 turn_end 丢失, brief turn 无法收口, 后续消息全部错位 (off-by-one)。
+        // 安全性: newSession 的 fresh pane 在 inject 前只写过 system/init (→ 无 item),
+        // 用户行有 isOwnInject 过滤 —— 提前解除不会泄漏脏数据。
+        a.muteUntilInject = false;
         const r = await inject({
           text, images, cfg, log: log.child({ principal, sessionId: sid }),
           sessionId: sid, jsonlPath: a.jsonlPath, tmuxTarget: a.tmuxPane, freshSpawn,
         });
         if (!r.ok) {
-          a.muteUntilInject = false;
           if (s) {
             s.acc = s.acc ? `${s.acc}\n\n[mirror] ✗ ${r.reason ?? "failed"}` : `[mirror] ✗ ${r.reason ?? "failed"}`;
             await finalizeStream(a, s);
@@ -4939,8 +5002,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           }
           return;
         }
-        // inject 成功 → 解除初始输出静默, 后续 onItem 正常流转。
-        a.muteUntilInject = false;
         // Inject "succeeded" but the input box never cleared — the target
         // session may be busy / not consuming input (long task, full context).
         // Hint the user once so a silently-dropped message isn't mistaken for a

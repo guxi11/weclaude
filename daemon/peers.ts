@@ -113,27 +113,40 @@ const blockTextWithTools = (content: unknown): string => {
 };
 
 /** Like `tailTurns` but the flattened text includes tool_use/tool_result
- *  content — the dedup-only reader so quoted tool bubbles match context. */
+ *  content — the dedup-only reader so quoted tool bubbles match context.
+ *  `n` counts logical conversation turns (user→assistant transitions), not
+ *  individual transcript records — essential for backends like CodeBuddy
+ *  where a single turn is split across many jsonl lines (text, function_call,
+ *  function_call_result, reasoning, …). */
 export const tailTurnsWithTools = (jsonlPath: string, n = 3): string => {
   const raw = readTail(jsonlPath);
   if (!raw) return "";
   const normalize = backendForPath(jsonlPath).normalizeTranscriptLine;
-  return raw
-    .split("\n")
-    .filter((l) => l.trim())
-    .flatMap((line) => {
-      let parsed: unknown;
-      try { parsed = JSON.parse(line); } catch { return []; }
-      let row;
-      try { row = normalize(parsed); } catch { return []; }
-      if (!row || row.isMeta || row.isSidechain) return [];
-      const role = row.message?.role;
-      if (role !== "user" && role !== "assistant") return [];
-      const text = blockTextWithTools(row.message?.content).replace(META_RE, "").replace(/\s+/g, " ").trim();
-      return text ? [text] : [];
-    })
-    .slice(-n)
-    .join("\n");
+  const entries: Array<{ role: string; text: string }> = [];
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    let parsed: unknown;
+    try { parsed = JSON.parse(line); } catch { continue; }
+    let row;
+    try { row = normalize(parsed); } catch { continue; }
+    if (!row || row.isMeta || row.isSidechain) continue;
+    const role = row.message?.role;
+    if (role !== "user" && role !== "assistant") continue;
+    const text = blockTextWithTools(row.message?.content).replace(META_RE, "").replace(/\s+/g, " ").trim();
+    if (text) entries.push({ role, text });
+  }
+  // Count logical turns: each user→assistant transition (or assistant→user)
+  // is one turn. Walk backward to find the cut point for the last `n` turns.
+  let turns = 0;
+  let cutIdx = entries.length;
+  for (let i = entries.length - 1; i > 0; i--) {
+    if (entries[i]!.role !== entries[i - 1]!.role) {
+      turns++;
+      if (turns >= n) { cutIdx = i; break; }
+    }
+  }
+  if (turns < n) cutIdx = 0; // fewer turns than requested — return everything
+  return entries.slice(cutIdx).map((e) => e.text).join("\n");
 };
 
 // Transcript prose is arbitrary text: backticks / asterisks / pipes lifted out of
