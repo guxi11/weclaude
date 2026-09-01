@@ -1872,8 +1872,9 @@ interface AttachState {
   thinkFlushing?: boolean;
   /** 软收口的静默期计时器 —— 任何新 item 到达即撤销。 */
   softEnd?: NodeJS.Timeout;
-  /** thinkStyle 兜底: turn 超时未 conclude → 强制软收口, 从 thinking 捞正文。 */
-  thinkRescueTimer?: NodeJS.Timeout;
+  // thinkRescueTimer removed: softEnd (10s silence) + hardTimer (350s) already
+  // cover the "turn never concludes" case without a fixed wall-clock cutoff that
+  // fires prematurely on long-running codebuddy turns (see #stream incident).
   /** CLI 侧最近一条用户输入, 用作下一个"无气泡 turn"(ensureBriefTurn) 的 userQuery。
    *  WeCom 发起的 turn 直接从 dispatch 拿到原文, 用不到它。 */
   pendingBriefQuery?: string;
@@ -2017,13 +2018,15 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const EARLY_LINK_MS = 3_000;
   /** 软收口静默期。后端只能说"这条消息写完了"(codebuddy) 时, 等这么久没有新 item
    *  才认定一轮结束。取值只需盖住"叙述消息落盘 → 紧随其后的 function_call 落盘"
-   *  这一段, 与模型思考/工具执行时长无关。 */
-  const SOFT_TURN_END_MS = 4_000;
+   *  这一段, 与模型思考/工具执行时长无关。
+   *  codebuddy 默认 10s (实测 <40ms, 但留余量防 fs.watch 抖动 / 落盘延迟);
+   *  claude 默认 4s (硬信号兜底, 软收口极少触发)。可由 config 覆盖。 */
+  const SOFT_TURN_END_DEFAULT_CLAUDE = 4_000;
+  const SOFT_TURN_END_DEFAULT_CB = 10_000;
+  const softTurnEndMsFor = (a: AttachState): number =>
+    cfg.wrc.mirror.softTurnEndMs ?? (backendForPath(a.jsonlPath).name === "codebuddy" ? SOFT_TURN_END_DEFAULT_CB : SOFT_TURN_END_DEFAULT_CLAUDE);
   const STREAM_SOFT_CAP = 18_000;
   const TOOL_DETAIL_TTL_MS = 24 * 60 * 60 * 1000;
-  /** thinkStyle 兜底超时: turn 开始 2min 后仍未 conclude → 强制软收口。
-   *  比 HARD_TIMEOUT_MS (350s) 短, 气泡还活着时走 finishBriefBubble 路径。 */
-  const THINK_RESCUE_TIMEOUT_MS = 120_000;
   /** Standalone 发送前正文检查: 内容无正文 (纯 think 标记 / 工具行) 时,
    *  回队列等这么久。期间有新消息入队则重置; 到期且无新消息才发出。 */
   const STANDALONE_BODY_WAIT_MS = 8_000;
@@ -2527,21 +2530,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.briefThinking = undefined;
     if (a.thinkFlushTimer) { clearTimeout(a.thinkFlushTimer); a.thinkFlushTimer = undefined; }
     a.thinkFlushing = false;
-    if (a.thinkRescueTimer) { clearTimeout(a.thinkRescueTimer); a.thinkRescueTimer = undefined; }
-    if (thinkStyle) {
-      a.thinkRescueTimer = setTimeout(() => {
-        if (a.briefTurnId === q.turnId && !a.briefConcluded) {
-          log.warn({ sessionId: a.sessionId, turnId: q.turnId, hasThinking: !!a.briefThinking }, "brief: thinkStyle rescue timeout — forcing close");
-          // 立即刷一次最新 thinking 到气泡 (跳过去抖), 让用户看到完整积累内容,
-          // 而不是停在上一次 250ms 去抖窗口的快照。
-          if (a.thinkFlushTimer) { clearTimeout(a.thinkFlushTimer); a.thinkFlushTimer = undefined; }
-          if (a.briefBubble && !a.briefBubble.done && a.briefThinking?.trim()) {
-            void doStreamThink(a);
-          }
-          closeBriefTurn(a, true);
-        }
-      }, THINK_RESCUE_TIMEOUT_MS);
-    }
     log.info({ sessionId: a.sessionId, turnId: q.turnId, isSlash: q.isSlash }, "brief: turn started");
   };
 
@@ -2749,7 +2737,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.briefThinking = undefined;
     if (a.thinkFlushTimer) { clearTimeout(a.thinkFlushTimer); a.thinkFlushTimer = undefined; }
     a.thinkFlushing = false;
-    if (a.thinkRescueTimer) { clearTimeout(a.thinkRescueTimer); a.thinkRescueTimer = undefined; }
     // 放行下一个排队的 turn —— 它的气泡早在 ack 时就挂出去了, 这里只是激活。
     const next = a.briefQueue?.shift();
     if (next) openBriefTurn(a, next);
@@ -3024,7 +3011,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // 硬信号 (end_turn / turn_duration) 的后端永远不会走到这里。
     if (a.softEnd) { clearTimeout(a.softEnd); a.softEnd = undefined; }
     if (item.kind === "turn_end" && item.soft === true) {
-      a.softEnd = setTimeout(() => fireSoftTurnEnd(a), SOFT_TURN_END_MS);
+      a.softEnd = setTimeout(() => fireSoftTurnEnd(a), softTurnEndMsFor(a));
       return;
     }
     // codebuddy: ExitPlanMode 若被本地先答, result 落盘即作废挂着的计划审批卡

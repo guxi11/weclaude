@@ -102,6 +102,10 @@ const Mirror = z.object({
   // 思考以 `<think>…</think>` 前缀拼进最终答复气泡: `<think>xxx</think>\n\nfinal reply`。
   // 关闭 (默认) = 现状: thinking 只写详情, 聊天只见最终答复。
   thinkStyle: z.boolean().default(false),
+  // 软收口静默期 (ms)。codebuddy 后端只能说"这条消息写完了", 等这么久没有新 item
+  // 才认定一轮结束。值越大越不容易误收 (model 思考时间长), 但用户等最终结论的延迟也
+  // 越大。不设则按后端自动选择: codebuddy 10s, claude 4s。
+  softTurnEndMs: z.number().int().positive().optional(),
   // ── Prompt-cache keepalive ────────────────────────────────────────────
   // Anthropic prompt caching: cache-write costs 1.25x, cache-read 0.1x, and the
   // cache lives only ~5min. A pane that goes idle (agent parked waiting on a
