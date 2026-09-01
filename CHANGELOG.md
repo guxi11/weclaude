@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [1.2.31] - 2026-09-01
+
+### Fixed
+- `mirror` think-style: **气泡收口后的 reasoning 不再作为裸正文泄进聊天**。长 turn 里气泡一旦收口(6min 编辑窗口、`earlyLinkBubble`、工具密集),后续落盘的 thinking 只能走 standalone 补发,而 standalone 的 think 识别只认 `🔧` / `↳` 两个工具行前缀 —— 纯 reasoning 段落被当成正文整段裸奔出去。`pushThink` 现在给进 standalone 的中间内容打 `💭` 传输标记,`formatThinkStandalone` 凭它分流入 `<think>`(标记在渲染时剥掉;`🔧` / `↳` 是给用户的工具行标记,保留)。
+- `mirror` think-style: **软后端(codebuddy)的最终答复不再被误包进 `<think>`**。软后端没有 `final` 标记,终句与中间文本共用 `final===undefined`,此前一律走 `pushThink` —— 气泡活着时无害(收口有 `stripTrailingBody` 剥重复纠偏),气泡死了就等于给答复打上 think 标记直接发出去。现在该分支按气泡状态分流:活则仍进 think 累积并记 `briefLastText`,终句身份留给 `closeBriefTurn(soft)` 定夺;死则按正文发 —— 没有收口阶段可纠偏,而它很可能就是终句。
+
 ## [1.2.30] - 2026-09-01
 
 ### Changed
@@ -262,7 +268,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v1.2.30...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v1.2.31...HEAD
+[1.2.31]: https://github.com/guxi11/wezard/compare/v1.2.30...v1.2.31
 [1.2.30]: https://github.com/guxi11/wezard/compare/v1.2.29...v1.2.30
 [1.2.29]: https://github.com/guxi11/wezard/compare/v1.2.28...v1.2.29
 [1.2.21]: https://github.com/guxi11/wezard/compare/v1.2.20...v1.2.21

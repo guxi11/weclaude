@@ -2202,10 +2202,12 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const thinkLines: string[] = [];
     const bodyLines: string[] = [];
     for (const line of lines) {
-      if (line.startsWith("🔧 ") || line.startsWith("↳ ")) thinkLines.push(line);
+      if (line.startsWith("🔧 ") || line.startsWith("↳ ") || line.startsWith("💭 ")) thinkLines.push(line);
       else bodyLines.push(line);
     }
-    const think = thinkLines.join("\n").trim();
+    // `💭 ` 只是 pushThink 打在 standalone 路径上的传输标记 (让本函数认出 think 来源),
+    // 没有展示价值 —— 剥掉。🔧 / ↳ 是给用户的工具行标记, 保留。
+    const think = thinkLines.map((l) => l.replace(/^💭 /, "")).join("\n").trim();
     const body = bodyLines.join("\n").trim();
     if (think && body) return `${openThink(a.target, think)}</think>\n\n${body}`;
     if (think) return `${openThink(a.target, think)}</think>`;
@@ -2530,7 +2532,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     } else if (a.briefTurnId) {
       // 气泡已收口 / 无气泡 turn: 走 standalone, 避免长 turn 期间 chat 静默。
       // 原始内容入队, flushStandalone 统一做 thinkStyle 格式化 (工具行→<think>, 其余→正文)。
-      enqueueStandalone(a, c);
+      // fix: thinkStyle 加 `💭 ` 前缀, formatThinkStandalone 才能识别为 think 行 (否则
+      // 纯 reasoning 被当 body 整段裸奔到 chat)。
+      enqueueStandalone(a, thinkStyle ? `💭 ${c}` : c);
     }
   };
 
@@ -2878,18 +2882,23 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (item.kind === "text") {
       recordTurnItem(turnId, { t: "text", body: item.body, ts: now, final: item.final === true });
       // think-style: 确知的中途输出 (final===false) 只进 think 流, 不算结论;
-      // 软后端的不确定态 (final===undefined) 也 pushThink — 气泡活时累积到
-      // briefThinking + 写 briefLastText (收口用); 气泡死时直接 standalone 发出,
-      // 不写 briefLastText (已发, 收口不再重复)。
+      // 软后端的不确定态 (final===undefined) 两可 — 见下方分支里的分流说明。
       if (thinkStyle && item.final === false) {
         pushThink(a, item.body);
         return;
       }
       if (thinkStyle && item.final === undefined) {
-        pushThink(a, item.body);
-        // 气泡还活时 pushThink 只累积 briefThinking, 收口需要 briefLastText 当 body;
-        // 气泡已死时 pushThink 走了 standalone 已发出, 不写 briefLastText 避免收口重复。
-        if (a.briefBubble && !a.briefBubble.done) a.briefLastText = item.body;
+        // 软后端说不清这句是不是终句, 两可:
+        // 气泡还活 → 进 think 累积 (收口时 stripTrailingBody 会剥掉重复), 同时记
+        //   briefLastText 当正文候选; 终句身份留给 closeBriefTurn(soft) 定夺。
+        // 气泡已死 → 没有收口阶段可纠偏, 只能按正文发 —— 它很可能就是终句,
+        //   走 pushThink 会给它打 💭 前缀, 把答复整个塞进 <think>。
+        if (a.briefBubble && !a.briefBubble.done) {
+          a.briefLastText = item.body;
+          pushThink(a, item.body);
+        } else {
+          enqueueStandalone(a, item.body);
+        }
         return;
       }
       a.briefLastText = item.body; // 软收口时拿它当结论 (那条路径上没有 final 标记)
