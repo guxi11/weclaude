@@ -29,6 +29,13 @@ npm run build && ./cli/wezard.sh reload    # rebuild, then bounce the resident d
 
 When the user says **"reload"** in this repo, it means exactly: `npm run build && ./cli/wezard.sh reload`. The global `wezard` binary may not be on `$PATH` in dev shells — always invoke `./cli/wezard.sh` from the repo root.
 
+## Release / changelog
+
+Every version bump **must** update `CHANGELOG.md` — no release without a changelog entry. Follow [Keep a Changelog](https://keepachangelog.com/) + [SemVer](https://semver.org/):
+- Newest version on top; collect in-flight work under `## [Unreleased]` and rename it to `## [x.y.z] - YYYY-MM-DD` at tag time.
+- Group changes under `Added` / `Changed` / `Deprecated` / `Removed` / `Fixed` / `Security`; label breaking changes **BREAKING**.
+- Keep the compare-link footer in sync (add the new `[x.y.z]` link, repoint `[Unreleased]`).
+
 ## High-level architecture
 
 Three processes, all coordinating via 127.0.0.1:17890 and `~/.wezard/`:
