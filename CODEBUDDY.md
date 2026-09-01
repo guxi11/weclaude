@@ -78,6 +78,7 @@ Three processes, all coordinating via 127.0.0.1:17890 and `~/.wezard/`:
 - **Uninstall order**: `wezard uninstall` *before* `npm uninstall -g wezard`. Otherwise launchd repeatedly tries to relaunch a deleted binary. State at `~/.wezard/` is intentionally preserved.
 - **Card update has a 5s window**: `client.updateTemplateCard` only works within 5s of the click event — `installApprovalEventListener` does the rewrite synchronously inside the event handler.
 - **Mirror mode** runs against either `~/.claude-internal/projects/` or `~/.claude/projects/` — `cli/wezard.sh mirror` probes both bases for the encoded cwd.
+- **thinkStyle** wraps intermediate content (reasoning, tool calls, tool results) in `<think>` tags inside the same stream/standalone messages that non-thinkStyle brief mode uses. It does NOT have its own accumulate-then-send pipeline — it reuses the standard brief-mode stream + standalone channels and just formats the payload differently. It also suppresses chat-detail links (`linkedTagPrefix` returns `""`).
 - **Long-poll timeouts**: hook curl `--max-time` (`approval.hookTimeoutSec`, default 43210) must be **strictly larger** than `approval.longPollSec` (default 43200 = 12h), or the hook returns `ask` while the daemon is still waiting on a click.
 - **Sensitive arg redaction** (`daemon/redact.ts`) runs before card render when `approval.sensitiveArgRedact=true`. Only the redacted form is shown in WeCom and stored in pending meta.
 

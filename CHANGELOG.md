@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+## [1.2.29] - 2026-09-01
+
+### Changed
+- `mirror` standalone 防抖窗口默认 `3s → 8s`(`wrc.mirror.standaloneDebounceMs`)。连续工具调用间隔常超过 3s,窗口太短仍会按气泡刷屏;8s 能把一整串工具调用聚合成一条 markdown 后再补发。
+
 ## [1.2.22] - 2026-08-27
 
 ### Changed
@@ -252,7 +257,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v1.2.21...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v1.2.29...HEAD
+[1.2.29]: https://github.com/guxi11/wezard/compare/v1.2.28...v1.2.29
 [1.2.21]: https://github.com/guxi11/wezard/compare/v1.2.20...v1.2.21
 [1.2.20]: https://github.com/guxi11/wezard/compare/v1.2.19...v1.2.20
 [1.2.19]: https://github.com/guxi11/wezard/compare/v1.2.18...v1.2.19
