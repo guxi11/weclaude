@@ -263,6 +263,13 @@ interface TailDeps {
    *  after the tool resolves, so the tail re-emits text we already mirrored;
    *  suppress that one echo. One-shot — a genuine later re-say still streams. */
   isOwnAssistantSend?: (text: string) => boolean;
+  /** Content-based keepalive ping detector: true when a user line's text IS
+   *  one of the configured keepalive pings (kc.ping / kc.resumePing, plus the
+   *  bare "ping" legacy form). renderLine emits a keepalive_start signal for
+   *  it — the swallow judgment keys on the USER MESSAGE, not on in-memory
+   *  timers or inject-echo TTLs, so reloads / tail replays / slow replies
+   *  can't leak the ping or its reply into chat. */
+  isKeepalivePing?: (text: string) => boolean;
   onItem: (item: RenderItem) => void;
   /** Build a click-to-detail URL for a tool_use id; returns "" when disabled
    *  (cfg.daemon.detailLinksInMirror=false) so the tail can skip wrapping the
@@ -461,6 +468,13 @@ type RenderItem =
   // NOT originate from the still-open WeCom liveStream — onItem uses this to
   // finalize the prior bubble so the new conversation gets its own bubble.
   | { kind: "user_text"; body: string }
+  // The user line that started this turn IS a keepalive ping (content match
+  // via TailDeps.isKeepalivePing). Emitted REGARDLESS of includeUser — the
+  // ping must never echo as user_text, and onItem swallows the whole reply
+  // turn by content until its turn_end. Belt to the timer-based
+  // keepaliveQuiet: survives daemon reloads, tail replays and replies slower
+  // than the 60s fail-safe.
+  | { kind: "keepalive_start"; body: string }
   // Claude Code's /goal command was activated (session-scoped Stop hook marker
   // detected in the transcript). Carries the goal condition. onItem switches the
   // attachment into goal-progress mode — see handleGoalItem. Emitted regardless
@@ -617,10 +631,14 @@ const renderLine = (raw: string, deps: TailDeps): RenderItem[] => {
       const goal = goalStartOf(c);
       if (goal) return [goal];
 
-      if (!deps.includeUser) return [];
-
       const text = cleanUserText(c);
       if (!text) return []; // pure slash-command meta / stdout — drop
+      // Keepalive ping user line: judged by CONTENT, before every other gate
+      // (includeUser / isOwnInject's 60s TTL) — the ping never echoes, and
+      // the reply turn is swallowed by content in onItem. Timer windows can't
+      // cover reloads or replays; the user message itself always can.
+      if (deps.isKeepalivePing?.(text)) return [{ kind: "keepalive_start", body: text }];
+      if (!deps.includeUser) return [];
       if (deps.isOwnInject(text)) return []; // dedupe WeCom→CLI echo
       const quoted = text.split("\n").map((l) => `> ${l}`).join("\n");
       out.push({ kind: "user_text", body: quoted });
@@ -1868,6 +1886,14 @@ interface AttachState {
    *  (cache-read snapshot) is routed here from the swallowed turn_usage items,
    *  so the timeline shows the ping happened and proves it was a cheap read. */
   keepaliveTurnId?: string;
+  /** Content-based keepalive swallow — set by a keepalive_start item (the
+   *  tailed user line matched a configured ping text). Unlike keepaliveQuiet
+   *  it has no 60s cap: holds until the reply's turn_end, the next genuine
+   *  user line, or its own (generous) fail-safe — a slow pong must not leak. */
+  keepaliveByContent?: boolean;
+  /** Fail-safe timer for keepaliveByContent — a reply that never emits
+   *  turn_end (crash/hang) must not mute a later real turn forever. */
+  keepaliveContentTimer?: NodeJS.Timeout;
 }
 
 // Mirror outbound state machine. See plan: defer stream open by N ms; flush
@@ -1957,6 +1983,20 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (i === -1) return false;
     recentAssistantSends.splice(i, 1); // one-shot: a genuine later re-say still streams
     return true;
+  };
+
+  // Keepalive ping detector for the tail's user-line judgment — the SAME
+  // normalized-prefix signature set keepaliveTick feeds keepaliveStamps
+  // (every configured form + the bare "ping" legacy streak form), so
+  // renderLine, the tick and the transcript parser all agree on what counts
+  // as a ping. Content is the source of truth for the swallow: timers and
+  // echo-TTLs lose it across reloads/replays.
+  const keepalivePingSigs = [cfg.wrc.mirror.keepalive.ping, cfg.wrc.mirror.keepalive.resumePing]
+    .map((p) => normAssistant(p).slice(0, 40))
+    .filter((s) => s.length > 0);
+  const isKeepalivePing = (text: string): boolean => {
+    const n = normAssistant(text);
+    return n.toLowerCase() === "ping" || keepalivePingSigs.some((sig) => n.includes(sig));
   };
 
   // ── Typewriter stream lifecycle ────────────────────────────────────
@@ -2762,12 +2802,35 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (a.liveStream && !a.liveStream.closed) void finalizeStream(a, a.liveStream);
   };
 
-  // Close the keepalive quiet window — the ping turn is over (or the fail-safe
-  // fired), so subsequent real items flow through onItem normally again.
-  const endKeepaliveQuiet = (a: AttachState): void => {
-    if (!a.keepaliveQuiet) return;
-    clearTimeout(a.keepaliveQuiet);
-    a.keepaliveQuiet = undefined;
+  // End the keepalive swallow — the ping turn is over (turn_end / genuine
+  // user line / inject failure), so real items flow through onItem again.
+  // Clears BOTH the timer window and the content flag.
+  const endKeepaliveSwallow = (a: AttachState): void => {
+    if (a.keepaliveQuiet) { clearTimeout(a.keepaliveQuiet); a.keepaliveQuiet = undefined; }
+    if (a.keepaliveContentTimer) { clearTimeout(a.keepaliveContentTimer); a.keepaliveContentTimer = undefined; }
+    a.keepaliveByContent = undefined;
+  };
+
+  // Content-based swallow entry: the tailed user line IS a configured ping.
+  // Belt to the inject-time timer window — this one keys on the user message
+  // itself, so it holds across daemon reloads, tail replays and replies
+  // slower than the 60s fail-safe. Reuses the detail turn the timer flow may
+  // have opened (fireKeepalive skips opening when this got there first).
+  const KEEPALIVE_CONTENT_FAILSAFE_MS = 5 * 60_000;
+  const beginKeepaliveByContent = (a: AttachState, text: string): void => {
+    a.keepaliveByContent = true;
+    if (a.keepaliveContentTimer) clearTimeout(a.keepaliveContentTimer);
+    // Fail-safe: a ping turn whose reply never emits turn_end (crash/hang)
+    // must not mute a later real turn forever.
+    a.keepaliveContentTimer = setTimeout(() => {
+      a.keepaliveContentTimer = undefined;
+      a.keepaliveByContent = undefined;
+    }, KEEPALIVE_CONTENT_FAILSAFE_MS);
+    if (!a.keepaliveTurnId) {
+      const turnId = newTurnId();
+      a.keepaliveTurnId = turnId;
+      recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, userQuery: text });
+    }
   };
 
   // A keepalive ping turn is swallowed wholesale — the reply content doesn't
@@ -2776,12 +2839,20 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const onItem = (a: AttachState, item: RenderItem): void => {
     // 新 spawn 的 pane 在首次 inject 落地前吞掉所有初始输出 (greeting/system)。
     if (a.muteUntilInject) return;
-    // Keepalive ping turns are cache-warmers: swallow every item from the WeCom
-    // paths so the ping/pong never reaches chat. But record the REAL exchange
-    // into its chat-detail turn — the actual assistant reply, the tool calls if
-    // any, and the usage (proof it was a cheap cache-read) — so the detail page
-    // shows the genuine heartbeat, not a synthetic summary.
-    if (a.keepaliveQuiet) {
+    // Keepalive ping turns are cache-warmers: swallow every item from every
+    // WeCom path so the ping/pong never reaches chat. Two triggers, either
+    // suffices — the timer window opened at inject (keepaliveQuiet) OR the
+    // user line itself matching a configured ping (keepaliveByContent; the
+    // reload/replay/slow-reply-proof one). The REAL exchange is recorded
+    // into its chat-detail turn — the actual assistant reply, the tool calls
+    // if any, and the usage — so the detail page shows the genuine heartbeat.
+    if (item.kind === "keepalive_start") { beginKeepaliveByContent(a, item.body); return; }
+    // A genuine user line (not our inject, not a ping) is a hard turn
+    // boundary — any keepalive swallow still holding never got its turn_end
+    // (crashed reply). Release BEFORE the swallow gate so this real line (and
+    // its reply) mirror normally instead of being eaten by the stale swallow.
+    if (item.kind === "user_text") endKeepaliveSwallow(a);
+    if (a.keepaliveQuiet || a.keepaliveByContent) {
       const id = a.keepaliveTurnId;
       if (id) {
         const now = Date.now();
@@ -2796,7 +2867,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           a.keepaliveTurnId = undefined;
         }
       }
-      if (item.kind === "turn_end") { endKeepaliveQuiet(a); }
+      if (item.kind === "turn_end") { endKeepaliveSwallow(a); }
       return;
     }
     // 任何新 item 到达 = 上一条"消息写完了"并不代表这一轮结束 → 撤销待确认的软收口。
@@ -3105,6 +3176,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       toolUseInlineMaxChars: cfg.wrc.mirror.toolUseInlineMaxChars,
       isOwnInject,
       isOwnAssistantSend,
+      isKeepalivePing,
       onItem: (item) => onItem(a, item),
       detailUrlFor,
       sessionId,
@@ -3472,6 +3544,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       toolUseInlineMaxChars: cfg.wrc.mirror.toolUseInlineMaxChars,
       isOwnInject,
       isOwnAssistantSend,
+      isKeepalivePing,
       onItem: (item) => onItem(a, item),
       detailUrlFor,
       sessionId: newSessionId,
@@ -4211,7 +4284,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       sessionId: a.sessionId, jsonlPath: a.jsonlPath, tmuxTarget: a.tmuxPane,
     });
     if (!r.ok) {
-      endKeepaliveQuiet(a);
+      endKeepaliveSwallow(a);
       if (a.keepalive) a.keepalive.pinging = false; // roll back so the next tick can retry
       log.warn({ target: a.target, reason: r.reason }, "keepalive: inject failed");
       return;
@@ -4223,9 +4296,13 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // actual ping we injected; the assistant reply (expected: just "pong"), any
     // tool calls, and usage are grafted on from the swallowed items in onItem;
     // closed on the ping's turn_end (or the fail-safe). Kept out of chat.
-    const turnId = newTurnId();
-    a.keepaliveTurnId = turnId;
-    recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, userQuery: text });
+    // The tail's keepalive_start (content match on the user line) may have
+    // opened this turn already — only open when it hasn't.
+    if (!a.keepaliveTurnId) {
+      const turnId = newTurnId();
+      a.keepaliveTurnId = turnId;
+      recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, userQuery: text });
+    }
   };
 
   let keepaliveTicking = false;

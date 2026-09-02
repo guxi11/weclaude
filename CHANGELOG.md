@@ -10,6 +10,11 @@
 ### Removed
 - MCP `enter` 工具与 `POST /mirror/cwd` 写路由（读取用的 `GET /mirror/cwd` 保留），由 `set_workspace` / `POST /mirror/workspace` 取代。
 
+## [1.3.4] - 2026-09-02
+
+### Fixed
+- `mirror`: **keepalive 静默判定改为按 user message 内容判断, 不再依赖内存计时窗口**。此前 ping/pong 是否进 chat 取决于 `keepaliveQuiet` 60s 窗口与 `isOwnInject` 60s TTL —— daemon reload / tail replay / 回复慢于 60s 时窗口失效, ping 原文与 pong 回复泄进群聊。现在 `renderLine` 对 user 行先做内容匹配 (`isKeepalivePing`, 与 `keepaliveStamps` 同一套归一化签名: `kc.ping` / `kc.resumePing` 前缀 + 裸 `ping`), 命中即发 `keepalive_start`, `onItem` 据此开启**内容级吞没** (`keepaliveByContent`): ping 行本身不回显、整轮回复(含 thinking/CoT 进度)全吞直到 `turn_end`; 真实 user 行或 5min fail-safe 兜底解除, 崩溃的 ping 轮不会永久静默真轮次。detail turn 与计时路径互不复开 (`fireKeepalive` 检查 `keepaliveTurnId` 已存在)。
+
 ## [1.3.3] - 2026-09-02
 
 ### Changed
