@@ -68,7 +68,8 @@ const authPrincipals = (msg: BaseMessage): string[] => {
 // so users can copy-paste straight into a terminal to bind a Claude session.
 const renderIds = (msg: BaseMessage, cfg: Config): string => {
   const allowed = new Set(cfg.wrc.allowFrom.map((e) => sanitizeId(e)));
-  const mark = (id: string): string => (allowed.has(id) ? "✅ 已授权" : "❌ 未授权");
+  const mark = (id: string): string =>
+    allowed.has("all") || allowed.has(id) ? "✅ 已授权" : "❌ 未授权";
   const sender = `user:${msg.from.userid}`;
   if (msg.chattype === "group" && msg.chatid) {
     const chat = `chat:${msg.chatid}`;
@@ -453,6 +454,8 @@ const isAllowed = (cfg: Config, principals: string[]): boolean => {
   if (cfg.wrc.allowFrom.length === 0) return false;
   // Tolerate invisible chars sneaking into hand-edited config (paste artifacts).
   const allowed = new Set(cfg.wrc.allowFrom.map((e) => sanitizeId(e)));
+  // "all" is an explicit opt-in wildcard — anyone can talk to the bot.
+  if (allowed.has("all")) return true;
   return principals.some((p) => allowed.has(p));
 };
 

@@ -2,6 +2,15 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.3.2] - 2026-09-02
+
+### Added
+- `wrc.allowFrom` 支持 `"all"` 通配: 数组含 `"all"` 时任何人可用 (鉴权、`/id` 授权状态展示同步生效)。
+
+- `approval`: **新配置 `approval.danger.skipAll`(MCP key `danger_skip_all`) —— 跳过所有审批**。命中 matcher 的调用一律静默放行, 压过危险名单 / `askRules` / ⏱窗口 / 会话缓存; 与 `danger.skip`(只豁免名单命中) 成对、跳过范围递增。`denyRules` 拒绝与 `EnterPlanMode` 拦截仍生效 (拒绝不是审批), `AskUserQuestion` / `ExitPlanMode` 交互卡不受影响。与 `approval.enabled=false` 的区别: skipAll 明确回答 allow (CLI 零打扰), enabled=false 回答 ask (退回 CLI 本地权限)。`config_set` 的 `approval_mode` 增加枚举校验 (非法值会让 daemon reload 时 zod 抛错起不来)。新增 [审批配置.md](审批配置.md) 覆盖审批粒度、两个跳过开关、判定链与运行时切换。
+
+- `mirror`: 新配置 `wrc.mirror.slashAckFirstLine`(默认 `false`)。开启后 `/clear`、`/new` 的会话边界回执只发第一行 ack(`cleared` / `created`),不再附 📂 项目信息与 💡 tip;含 `/clear`→`/new` 升级路径。cwd 随时 `/pwd` 可查。已加入 MCP `config_set` 白名单(key `slash_ack_first_line`),可在 wezard 会话里直接开关,写盘 + 内存即时生效、无需 reload。
+
 ## [1.3.1] - 2026-09-02
 
 ### Changed
@@ -287,7 +296,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.1...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.2...HEAD
+[1.3.2]: https://github.com/guxi11/wezard/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/guxi11/wezard/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/guxi11/wezard/compare/v1.2.31...v1.3.0
 [1.2.31]: https://github.com/guxi11/wezard/compare/v1.2.30...v1.2.31

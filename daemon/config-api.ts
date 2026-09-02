@@ -6,16 +6,19 @@ type Action = "set" | "add" | "remove";
 type SetResult = { ok: true; key: string; before: unknown; after: unknown };
 type SetError = { ok: false; reason: string };
 
-const KEYS: Record<string, { path: string[]; type: "string" | "number" | "boolean" | "array" }> = {
+const KEYS: Record<string, { path: string[]; type: "string" | "number" | "boolean" | "array"; enum?: readonly string[] }> = {
   allow_from:       { path: ["wrc", "allowFrom"],                type: "array" },
   approval_window:  { path: ["approval", "windowMinutes"],       type: "number" },
   approval_cache:   { path: ["approval", "sessionCacheMinutes"], type: "number" },
   danger_skip:      { path: ["approval", "danger", "skip"],      type: "boolean" },
+  danger_skip_all:  { path: ["approval", "danger", "skipAll"],   type: "boolean" },
   danger_enabled:   { path: ["approval", "danger", "enabled"],   type: "boolean" },
-  approval_mode:    { path: ["approval", "mode"],                type: "string" },
+  // 枚举必须校验: 写进 jsonc 的非法值会让 daemon reload 时 zod 抛错起不来。
+  approval_mode:    { path: ["approval", "mode"],                type: "string", enum: ["all", "danger"] },
   cwd:              { path: ["wrc", "cwd"],                      type: "string" },
   default_chat:     { path: ["defaultChat"],                     type: "string" },
   log_level:        { path: ["daemon", "logLevel"],              type: "string" },
+  slash_ack_first_line: { path: ["wrc", "mirror", "slashAckFirstLine"], type: "boolean" },
 };
 
 const getNestedValue = (obj: unknown, path: string[]): unknown =>
@@ -75,6 +78,9 @@ export const configSet = (
 
   const parsed = parseValue(String(value ?? ""), spec.type);
   if (parsed === undefined) return { ok: false, reason: `cannot parse "${value}" as ${spec.type}` };
+  if (spec.enum && !spec.enum.includes(String(parsed))) {
+    return { ok: false, reason: `invalid value "${parsed}". valid: ${spec.enum.join("|")}` };
+  }
   patchJsonc(sourcePath, [{ path: spec.path, value: parsed }]);
   setNestedValue(cfg, spec.path, parsed);
   return { ok: true, key, before, after: parsed };

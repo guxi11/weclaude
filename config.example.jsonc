@@ -27,7 +27,8 @@
   // ── /wrc remote-control behavior ──────────────────────────────────
   "wrc": {
     // Allow which WeCom users / chats to drive CC. Empty = deny all.
-    "allowFrom": [],             // ["user:zhangsan", "chat:wcXXXX"]
+    // "all" = allow everyone (use with care).
+    "allowFrom": [],             // ["user:zhangsan", "chat:wcXXXX", "all"]
     // headless: spawn `claude -p` per msg with per-principal session map.
     // mirror : attach to an existing interactive `claude` session by injecting
     //          via `claude --resume <sid> -p` AND tailing the same session
@@ -55,7 +56,10 @@
       // Brief 模式: 每个 turn 群里只发两条 —— 「🧵 [本轮详情](url)」+ finish 文本。
       // 中间 tool_use / tool_result / thinking 只写进详情页 (可折叠, Claude 网页风格)。
       // 授权卡照常发群。
-      "brief": false
+      "brief": false,
+      // 斜杠命令回执精简: /clear、/new 只回第一行 ack ("cleared"/"created"),
+      // 不再附 📂 项目信息与 💡 tip。默认 false = 完整回执。
+      "slashAckFirstLine": false
     }
   },
 
@@ -110,6 +114,13 @@
     // (大小写不敏感) 追加自定义规则，allowPatterns 优先级最高。
     "danger": {
       "enabled": true,
+      // true = 命中危险名单的调用也免卡直接放行(只豁免命中名单的那些,
+      // 不是跳过所有审批)。默认 false。
+      "skip": false,
+      // true = 跳过所有审批: 命中 matcher 的调用一律静默放行, 压过危险名单/
+      // askRules/⏱窗口/缓存(denyRules 拒绝与 AskUserQuestion/ExitPlanMode
+      // 交互卡不受影响)。默认 false。
+      "skipAll": false,
       "builtin": true,
       "commandPatterns": [],     // 例: ["\\bpm2\\s+delete\\b"]
       "toolPatterns": [],        // 例: ["^mcp__prod__"]

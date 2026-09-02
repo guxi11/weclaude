@@ -340,6 +340,7 @@ wezard uninstall           # 完整卸载（先于 npm uninstall）
 ## 深入了解
 
 - [技术说明](技术说明.md) — 架构、消息双向同步流程、文档 MCP 桥接机制
+- [审批配置](审批配置.md) — 审批粒度（全量 / 仅危险 / 全跳过）、danger 名单、跳过开关的优先关系
 - [CLAUDE.md](CLAUDE.md) — 模块级职责与代码约定
 - [CHANGELOG.md](CHANGELOG.md) — 各版本变更
 

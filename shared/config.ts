@@ -100,6 +100,10 @@ const Mirror = z.object({
   // 中间 tool_use / tool_result / thinking / 非 final text 全部只写进详情页,不发气泡。
   // 授权卡照常发群 (交互无法替代)。false = 现状 (逐条气泡)。
   brief: z.boolean().default(true),
+  // 斜杠命令回执精简: /clear、/new 等会话边界命令的回执只发第一行 ack
+  // ("cleared" / "created"), 不再附 📂 项目信息与 💡 tip。cwd 随时 `/pwd` 可查。
+  // 默认 false = 现状 (ack + 项目信息 + tip 多行气泡)。
+  slashAckFirstLine: z.boolean().default(false),
   // 软收口静默期 (ms)。codebuddy 后端只能说"这条消息写完了", 等这么久没有新 item
   // 才认定一轮结束。值越大越不容易误收 (model 思考时间长), 但用户等最终结论的延迟也
   // 越大。不设则按后端自动选择: codebuddy 10s, claude 4s。
@@ -215,6 +219,11 @@ const Danger = z.object({
   // 完全免卡 —— 与 enabled=false 的区别: 名单仍会计算 (日志/redact 用得到),
   // 只是不再拦。默认 false。
   skip: z.boolean().default(false),
+  // true = 跳过所有审批: 命中 matcher 的调用一律静默放行, 压过危险名单 / askRules /
+  // ⏱窗口 / 会话缓存 —— 比 skip 更彻底 (skip 只豁免命中名单的调用, 普通调用照审)。
+  // denyRules 与 EnterPlanMode 拦截仍生效 (拒绝不是审批); AskUserQuestion /
+  // ExitPlanMode 交互卡不受影响。默认 false。
+  skipAll: z.boolean().default(false),
   // false = 丢掉内置名单, 只用下面三组自定义规则。
   builtin: z.boolean().default(true),
   commandPatterns: z.array(z.string()).default([]),
@@ -229,7 +238,8 @@ const Approval = z.object({
   //   "all"    — 每个命中 matcher 的工具调用都发卡 (默认, 现状)。
   //   "danger" — 只有命中危险名单 (approval.danger) 的调用才发卡, 其余静默 allow。
   //              名单被关掉 (danger.enabled=false) 时该模式自动退回 "all" —— 否则
-  //              就成了「全放行」, 与 approval.enabled=false 语义重合且更隐蔽。
+  //              就成了「全放行」, 与 danger.skipAll 语义重合且更隐蔽。
+  //   (跳过所有审批不在 mode 里 —— 用 danger.skipAll, 与 danger.skip 成对。)
   mode: z.enum(["all", "danger"]).default("all"),
   matcher: z.string().default(".*"),
   approvers: z.array(z.string()).default([]),

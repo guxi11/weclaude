@@ -3751,9 +3751,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
 
   // `header` folds the caller's ack ("created") into this same bubble — /new
   // must land as exactly ONE WeCom message, not card + separate reply.
+  // slashAckFirstLine: 会话边界回执只保留首行 ack, 📂 项目信息与 💡 tip 省去。
   const pushProjectInfo = (target: string, header?: string): void => {
-    const info = renderProjectInfo(target);
-    const md = header ? `${header}\n\n${info}` : info;
+    const concise = cfg.wrc.mirror.slashAckFirstLine && !!header;
+    const info = concise ? "" : renderProjectInfo(target);
+    const md = header ? (info ? `${header}\n\n${info}` : header) : info;
     const a = byTarget.get(target);
     if (a) {
       sendStandalone(a, md);
@@ -4924,7 +4926,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // and surface a standalone "cleared" so the user gets explicit
         // feedback (the skip-stream path otherwise leaves WeCom silent).
         if (armMigration) {
-          sendStandalone(a, `cleared\n\n${renderProjectInfo(a.target)}`);
+          // slashAckFirstLine: 只回首行 ack, 项目信息/tip 省去 (与 /new 一致)。
+          sendStandalone(a, cfg.wrc.mirror.slashAckFirstLine
+            ? "cleared"
+            : `cleared\n\n${renderProjectInfo(a.target)}`);
           a.clearRebind = { baseline: preClearBaseline! };
           startMigrationWatcher(a, preClearBaseline!, jsonlIsPostClearChild, 0, true);
         }

@@ -1888,6 +1888,17 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
       return;
     }
 
+    // danger.skipAll: 跳过所有审批 —— 命中 matcher 的调用一律静默放行, 压过危险
+    // 名单 / askRules / ⏱窗口 / 会话缓存 (与 danger.skip 的区别: 那个只豁免命中
+    // 名单的调用, 普通调用照审)。denyRules / EnterPlanMode 拦截在前面已生效
+    // (拒绝不是审批); AskUserQuestion / ExitPlanMode 交互卡在上方分支已返回, 不受影响。
+    if (cfg.approval.danger.skipAll) {
+      log.info({ toolName, sessionId }, "danger.skipAll auto allow");
+      json(res, 200, { decision: "allow", reason: "danger_skip_all" } satisfies ApproveResp);
+      settleGuard();
+      return;
+    }
+
     // danger.skip / danger 模式的早退。第三个参数是「除 danger 外还有没有别的必发卡
     // 理由」—— askRules 不能被 danger 的开关顺带关掉。守卫不在其列: 它要的是事后按框,
     // 早退照样能给 (settleGuard), 拿它挡早退等于把 danger 的开关废掉。
