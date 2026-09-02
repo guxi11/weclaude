@@ -40,6 +40,7 @@
 - [文档 / 智能表格 / 智能文档](#文档--智能表格--智能文档)
 - [事件订阅 / 定时广播](#事件订阅--定时广播)
 - [一个聊天里跑多个会话（`#tag` 路由）](#一个聊天里跑多个会话tag-路由)
+- [跨聊天：给聊天命名](#跨聊天给聊天命名)
 - [多 CLI 后端](#多-cli-后端claude--claude-internal--codebuddy)
 - [Prompt-cache 保活（省钱心跳）](#prompt-cache-保活省钱心跳)
 - [常用命令](#常用命令)
@@ -54,7 +55,7 @@
 
 ## 快速开始
 
-**前置**：macOS / Linux、Node ≥ 20、`tmux`、PATH 里能找到 `claude` 或 `claude-internal`、企业微信「智能机器人」的 `botId` + `secret`。
+**前置**：macOS / Linux、Node ≥ 20、`tmux`、PATH 里能找到 `claude` / `claude-internal` / `codebuddy`（至少一个）、企业微信「智能机器人」的 `botId` + `secret`。
 
 ```bash
 npm install -g wezard
@@ -66,10 +67,11 @@ wezard init
 | 问什么 | 落到哪 |
 | --- | --- |
 | botId / secret | `~/.wezard/secrets.json` |
-| 用哪个 Claude（`claude` / `claude-internal` / 自定义路径） | `~/.wezard/config.jsonc` |
+| 用哪些 Claude agent（`claude` / `claude-internal` / `codebuddy`，可多选） | `~/.wezard/config.jsonc` |
+| wrc 模式（`mirror` 推荐 / `headless`） | `~/.wezard/config.jsonc` |
 | 是否开启 PreToolUse 远程审批 | `~/.wezard/config.jsonc` |
 
-然后自动：编译 → 注入 hook/MCP → 装常驻 daemon（macOS launchd / Linux systemd --user）→ 等 WebSocket 鉴权。
+然后自动：编译 → 注入 hook/MCP（claude 家族装 wezard 插件，codebuddy 直接写 settings.json）→ 装 svr 详情中继 → 装常驻 daemon（macOS launchd / Linux systemd --user）→ 等 WebSocket 鉴权。已装过的凭证默认复用，还会把 Claude Code 的 `permissions` 一次性导入审批规则。
 
 **最后一步：绑定默认会话。** CLI 提示后，**在企业微信里**给机器人发：
 

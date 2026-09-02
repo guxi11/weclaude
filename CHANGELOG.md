@@ -2,6 +2,11 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.3.3] - 2026-09-02
+
+### Changed
+- 文档: **README 与技术说明对齐现状并补全缺口**。README 目录补「跨聊天:给聊天命名」;init 问题表补 wrc 模式行(修复 4 问 ↔ 3 行不一致),前置与自动流程链补 `codebuddy` / 插件安装 / svr 详情中继 / Claude permissions 一次性导入。技术说明新增「多会话路由」(`#tag` 提取与剥离、auto-spawn、命名聊天四级地址空间、多 CLI 由 jsonl 路径反推 dialect)与「Prompt-cache 保活」(`lastMs`/`lastRealMs` 双时钟、四道判定门、零污染与 reload 不复燃)两章,均附流程图。
+
 ## [1.3.2] - 2026-09-02
 
 ### Added
@@ -296,7 +301,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.2...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.3...HEAD
+[1.3.3]: https://github.com/guxi11/wezard/compare/v1.3.2...v1.3.3
 [1.3.2]: https://github.com/guxi11/wezard/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/guxi11/wezard/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/guxi11/wezard/compare/v1.2.31...v1.3.0
