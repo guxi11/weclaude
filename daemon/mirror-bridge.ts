@@ -666,8 +666,8 @@ const renderLine = (raw: string, deps: TailDeps): RenderItem[] => {
     const sr = line.message?.stop_reason;
     const isFinal = sr === "end_turn";
     // final 是三态: true=终句, false=已知的中途输出, undefined=后端说不清 (软收口)。
-    // 软后端不能填 false —— 那会让每句叙述都触发 earlyLinkBubble, 把 loading 气泡
-    // 提前收成详情链接, 一句话答完的 turn 也要拆成两条消息。
+    // 软后端不能填 false —— 那会让每句叙述都被当成中途输出标记上 briefHadTool, 一句
+    // 话答完的 turn 也要被当成"有工具"处理。
     const textFinal = isFinal ? true : line.softTurnEnd ? undefined : false;
     let pending: Array<{ toolUseId: string; name: string; input: unknown }> = [];
     const flushPending = (): void => {
@@ -1697,15 +1697,14 @@ interface ToolEntry {
   result?: string;
 }
 
-/** Brief turn 的 loading 气泡 —— 起始以 "…" (finish=false) 挂住不关闭。turn 收口时
- *  才定最终内容: 无工具→直接把结论写进这个气泡; 有工具→写详情链接 (结论另发
- *  standalone)。hardTimer 兜底 WeCom ~6min stream 窗口, 到点强制收口。 */
+/** Brief turn 的气泡 —— ack 时就把 `tag 详情链接 …` 写进去 (finish=false, 不关闭),
+ *  所以从收消息那一刻起群里就有可点的详情页入口, 而不是一个纯文本占位。后续:
+ *  正文到位 → 以 `链接 正文` 覆盖收口; 一直没正文 → hardTimer 兜底以纯链接收口。
+ *  hardTimer 兜底 WeCom ~6min stream 窗口, 到点强制 finish=true。 */
 interface BriefBubble {
   frame: WsFrameHeaders;
   streamId: string;
   hardTimer: NodeJS.Timeout;
-  /** 3s 早收口: inject 后若无 CLI 产出, 先把气泡收成详情链接。首条 item 到达即清。 */
-  earlyTimer?: NodeJS.Timeout;
   done: boolean;
 }
 
@@ -1815,10 +1814,9 @@ interface AttachState {
    *  要等当前轮结束才处理, 所以这边也必须排队: 强关当前 turn 会把仍在产出的后半轮
    *  改挂到新 turn 上 (旧 turn 页提前变「已完成」)。closeBriefTurn 顺序放行。 */
   briefQueue?: QueuedTurn[];
-  /** 本 turn 是否出现过 tool_use —— 决定气泡收口写结论还是写详情链接。 */
+  /** 本 turn 是否出现过工具调用 / 非 final 文本 —— 决定 skill_output 是当答案写进气泡
+   *  还是当中间反馈独立发。详情链接本身与它无关: 气泡从 ack 起就带着链接。 */
   briefHadTool?: boolean;
-  /** 详情链接已流进气泡 —— 气泡保持打开等正文。 */
-  briefDetailStreamed?: boolean;
   /** 本 turn 由 slash 命令 (/context…) 触发 —— 其 skill_output 即答案, 写进气泡而非 standalone。 */
   briefIsSlash?: boolean;
   /** 本 turn 的结论是否已经落地 (写进气泡或发了 standalone), 防止软收口重复推送。 */
@@ -1964,8 +1962,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // for >60s mid-turn and we don't want to drop the bubble while it's chewing.
   const FLUSH_MS = 250;
   const HARD_TIMEOUT_MS = 350_000;
-  /** 首条 CLI 产出到达前的早期超时: 3s 无响应则先收气泡为详情链接。 */
-  const EARLY_LINK_MS = 3_000;
   /** 软收口静默期。后端只能说"这条消息写完了"(codebuddy) 时, 等这么久没有新 item
    *  才认定一轮结束。取值只需盖住"叙述消息落盘 → 紧随其后的 function_call 落盘"
    *  这一段, 与模型思考/工具执行时长无关。
@@ -2349,9 +2345,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   };
 
   // ── Brief mode ────────────────────────────────────────────────────────
-  // 每个 turn 挂一条 loading 气泡 (起始 "…" finish=false, 不立刻关掉)。收口时:
-  //   • 无工具 → 直接把 Claude 最终文本 (或 slash 命令的 skill_output) 写进这条气泡。
-  //   • 有工具 → 气泡收成 "✴️ 详情链接", 最终文本另发一条 standalone。
+  // 每个 turn 挂一条气泡: ack 时就写进 `tag 详情链接 …` (finish=false, 不立刻关掉),
+  // 让群里从收到消息那一刻起就有详情页入口。收口时:
+  //   • 正文到位 → 以 `链接 正文` 覆盖这条气泡。
+  //   • 始终没正文 / 过 6min 窗口 → 以 ack 时那条纯 `链接` 收口。
+  //   • 气泡已收口或无气泡 turn (CLI 侧发起) → 正文另发一条 standalone。
   // 其它所有 item 只写入 turn detail store。
   // 能证明"assistant 已经在产出"的 item —— 见到它们才补开无气泡 turn。
   const BRIEF_TURN_OPENERS = new Set<RenderItem["kind"]>(["text", "tool_use", "tool_result", "skill_output"]);
@@ -2377,7 +2375,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (!b || b.done) return;
     b.done = true;
     clearTimeout(b.hardTimer);
-    if (b.earlyTimer) { clearTimeout(b.earlyTimer); b.earlyTimer = undefined; }
     if (a.briefBubble === b) a.briefBubble = undefined;
     const p = (async () => {
       try {
@@ -2402,7 +2399,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.briefBubble = q.bubble;
     a.briefIsSlash = q.isSlash;
     a.briefHadTool = false;
-    a.briefDetailStreamed = false;
     a.briefConcluded = false;
     a.briefLastText = undefined;
     log.info({ sessionId: a.sessionId, turnId: q.turnId, isSlash: q.isSlash }, "brief: turn started");
@@ -2445,28 +2441,18 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // WeCom ~6min stream 窗口快到, 必须 finish=true 收口。
       void finishBubble(a, bubble, briefDetailLink(turnId, a.target), true);
     }, HARD_TIMEOUT_MS);
-    // earlyTimer: 起轮 3s 后无条件把详情链接流进气泡 (finish=false, 气泡保持打开),
-    // 正文到位时再以 `link body` 收口。它是"气泡最迟 3s 必带详情链接"的保底, 而不是
-    // 等 CLI 产出的超时器 —— 因此与后端无关: codebuddy 按完整消息落盘, 首条 item 常在
-    // 几十秒后才到, 没有它气泡会一直停在 "…" 这个纯文本占位上。
-    // 排队中的轮照样挂 —— 它的气泡一样已经挂在群里等着, 没有理由让它一直空着。
-    bubble.earlyTimer = setTimeout(() => {
-      if (bubble.done) return;
-      // 只在本轮是当前活跃轮时认领 briefDetailStreamed —— 排队轮不能把标记写到
-      // 正在跑的那一轮的状态上。
-      if (a.briefBubble === bubble) a.briefDetailStreamed = true;
-      // 挂 `…` 表示"正文还没到" —— 整条内容会在正文到位时被替换掉。
-      void client.replyStream(bubble.frame, bubble.streamId, `${briefDetailLink(turnId, a.target)} …`, false)
-        .catch((e: Error) => log.warn({ sessionId: a.sessionId, err: e.message }, "brief: early detail stream failed"));
-    }, EARLY_LINK_MS);
     if (a.briefTurnId) {
       (a.briefQueue ??= []).push(q);
       log.info({ sessionId: a.sessionId, turnId, queued: a.briefQueue.length }, "brief: turn queued (previous still running)");
     } else {
       openBriefTurn(a, q);
     }
+    // ack 即详情链接。URL 的三个入参 (turnId / target / host) 在收消息这一刻全部已知 ——
+    // turnId 是本地生成的, 详情页记录也已在 recordTurnStart 建好, 所以不必等 CLI 产出,
+    // 也不必猜后端: 排队中的轮、codebuddy 那种几十秒后才落盘的轮, 入口都在。
+    // 尾随 `…` 表示"正文还没到", 正文到位时整条内容被 `链接 正文` 覆盖。
     try {
-      await client.replyStream(frame, streamId, withSessionTag(a.target, "…"), false);
+      await client.replyStream(frame, streamId, `${briefDetailLink(turnId, a.target)} …`, false);
     } catch (e) {
       log.warn({ sessionId: a.sessionId, turnId, err: (e as Error).message }, "brief: turn ack failed");
     }
@@ -2486,50 +2472,31 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.briefBubble = undefined;
     a.briefIsSlash = false;
     a.briefHadTool = false;
-    a.briefDetailStreamed = false;
     a.briefConcluded = false;
     a.briefLastText = undefined;
     sendRaw(a, briefDetailLink(turnId, a.target));
     log.info({ sessionId: a.sessionId, turnId }, "brief: turn started (CLI-side, no bubble)");
   };
 
-  // 本轮一旦出现工具调用 / tool_result / 非 final 文本 —— 将详情链接流进气泡 (不关闭),
-  // 保持气泡打开等正文到来后以 `link\n\nbody` 收口。
-  // 若正文一直不来, hardTimer / closeBriefTurn 兜底以纯 link 收口。
-  const streamDetailIntoBubble = async (a: AttachState): Promise<void> => {
-    const b = a.briefBubble;
-    if (!b || b.done || !a.briefTurnId || a.briefDetailStreamed) return;
-    a.briefDetailStreamed = true;
-    if (b.earlyTimer) { clearTimeout(b.earlyTimer); b.earlyTimer = undefined; }
-    const link = `${briefDetailLink(a.briefTurnId, a.target)} …`;
-    try {
-      await client.replyStream(b.frame, b.streamId, link, false);
-    } catch (e) {
-      log.warn({ sessionId: a.sessionId, err: (e as Error).message }, "brief: detail stream failed");
-    }
-  };
-
-  const earlyLinkBubble = (a: AttachState): void => {
-    if (!a.briefTurnId || !a.briefBubble || a.briefBubble.done) return;
+  // 本轮出现过工具调用 / tool_result / 非 final 文本 —— 只记状态: 详情链接从 ack 起
+  // 就挂在气泡里, 无需再推一次。气泡仍然不关, 等正文到来后以 `链接 正文` 覆盖收口。
+  const markBriefTool = (a: AttachState): void => {
+    if (!a.briefTurnId) return;
     a.briefHadTool = true;
-    void streamDetailIntoBubble(a);
   };
 
   // 本轮结论落地, 只生效一次:
-  //   • 无工具 → 结论 + 详情链接一并写进 loading 气泡;
-  //   • 有工具且气泡仍开 (detail 已流进去) → 以 link\n\nbody 收口;
-  //   • 有工具但气泡已收 / 无气泡 turn → body 走 standalone。
+  //   • 气泡仍开 (ack 时的 `链接 …` 还在) → 以 `链接 正文` 覆盖收口;
+  //   • 气泡已收 (过 6min 窗口 / 已收口) 或无气泡 turn (CLI 侧发起) → body 走 standalone,
+  //     那条 standalone 自带 `链接` 头 (withLinkedTag / ensureBriefTurn 已发过详情链接)。
   const concludeBriefTurn = (a: AttachState, body: string): void => {
     const turnId = a.briefTurnId;
     if (!turnId || a.briefConcluded || !body.trim()) return;
     a.briefConcluded = true;
-    if (a.briefDetailStreamed && a.briefBubble && !a.briefBubble.done) {
-      const link = briefDetailLink(turnId, a.target);
-      void finishBriefBubble(a, `${link} ${body}`, true);
-    } else if (a.briefHadTool || !a.briefBubble) {
-      sendStandalone(a, body);
+    if (a.briefBubble && !a.briefBubble.done) {
+      void finishBriefBubble(a, `${briefDetailLink(turnId, a.target)} ${body}`, true);
     } else {
-      void finishBriefBubble(a, `${body}\n\n${briefDetailLink(turnId, a.target)}`);
+      sendStandalone(a, body);
     }
     // 排队中的 turn 已经建了记录但还没跑, 不能被这把扫帚扫成「已完成」。
     const keep = [turnId, ...(a.briefQueue ?? []).map((q) => q.turnId)];
@@ -2541,23 +2508,15 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const closeBriefTurn = (a: AttachState, soft = false): void => {
     if (!a.briefTurnId) return;
     if (soft) concludeBriefTurn(a, a.briefLastText ?? "");
-    // 气泡还开着 —— 收口。
-    // briefDetailStreamed: detail 已流进气泡, 以相同内容 finish;
-    // 否则 (简单 turn / 气泡未被 detail stream 接管): 写详情链接收口。
+    // 气泡还开着 (正文始终没到) —— 以 ack 时就挂出的纯详情链接收口。
     if (a.briefBubble && !a.briefBubble.done) {
-      if (a.briefDetailStreamed) {
-        const link = briefDetailLink(a.briefTurnId, a.target);
-        void finishBriefBubble(a, link, true);
-      } else {
-        void finishBriefBubble(a, briefDetailLink(a.briefTurnId, a.target), true);
-      }
+      void finishBriefBubble(a, briefDetailLink(a.briefTurnId, a.target), true);
     }
     recordTurnClose(a.briefTurnId);
     log.info({ sessionId: a.sessionId, turnId: a.briefTurnId }, "brief: turn closed");
     a.briefTurnId = undefined;
     a.briefBubble = undefined;
     a.briefHadTool = false;
-    a.briefDetailStreamed = false;
     a.briefIsSlash = false;
     a.briefConcluded = false;
     a.briefLastText = undefined;
@@ -2579,7 +2538,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // 一个僵尸 turn 上来当活跃 turn, 白收一遍。
     for (const q of a.briefQueue ?? []) {
       closed++;
-      void finishBubble(a, q.bubble, briefDetailLink(q.turnId, a.target));
+      void finishBubble(a, q.bubble, briefDetailLink(q.turnId, a.target), true);
       recordTurnClose(q.turnId);
     }
     a.briefQueue = [];
@@ -2642,17 +2601,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const handleBriefItem = (a: AttachState, item: RenderItem): void => {
     const turnId = a.briefTurnId;
     if (!turnId) return;
-    // assistant 侧产出到达 → 清除 earlyTimer (链接已由 earlyLinkBubble 推过 / 正文就要
-    // 收口)。只认 opener: user_text 是注入回显与 CLI 侧敲字, 拿它清表会让气泡在模型
-    // 整个思考期停在占位上, 详情链接不再出现。
-    if (BRIEF_TURN_OPENERS.has(item.kind) && a.briefBubble?.earlyTimer) {
-      clearTimeout(a.briefBubble.earlyTimer);
-      a.briefBubble.earlyTimer = undefined;
-    }
     const now = Date.now();
     if (item.kind === "tool_use") {
-      a.briefHadTool = true; // 有工具 → 气泡收口写详情链接, 结论另发 standalone
-      earlyLinkBubble(a);    // 立刻推详情链接, 气泡保持开放等正文
+      markBriefTool(a);
       for (const c of item.calls) {
         // 也走单卡 detail record — turn 页里 tool_use 段可点开链到独立详情 (以后有需要时)。
         if (c.toolUseId) {
@@ -2675,14 +2626,14 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       return;
     }
     if (item.kind === "tool_result") {
-      earlyLinkBubble(a);
+      markBriefTool(a);
       recordTurnItem(turnId, { t: "tool_result", toolUseId: item.toolUseId, body: item.full, ts: now });
       return;
     }
     if (item.kind === "text") {
       recordTurnItem(turnId, { t: "text", body: item.body, ts: now, final: item.final === true });
       a.briefLastText = item.body;
-      if (item.final === false) earlyLinkBubble(a);
+      if (item.final === false) markBriefTool(a);
       if (item.final === true) concludeBriefTurn(a, item.body);
       return;
     }

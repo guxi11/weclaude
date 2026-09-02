@@ -4,12 +4,10 @@
 
 ## [Unreleased]
 
-### Fixed
-- `mirror` brief: **loading 气泡最迟 3s 必带详情链接**,不再整轮停在 `…` 文本占位上。`earlyTimer` 原本是"3s 无 CLI 产出才补链接"的超时器,有两处让它永不触发:codebuddy 后端被整体跳过(它按完整消息落盘,首条 item 常在几十秒后才到),以及 `handleBriefItem` 见到 `user_text`(注入回显 / CLI 侧敲字)就清表。现在 earlyTimer 是保底而非超时器 —— 与后端无关、排队中的轮同样挂出,只有 assistant 侧产出(`BRIEF_TURN_OPENERS`)才清除它。
-
 ### Changed
+- `mirror` brief: **收到消息那一刻就把详情链接挂进气泡**,ack 内容从 `…` 变成 `tag 详情链接 …`。链接的三个入参(turnId / target / host)在收消息时全部已知 —— turnId 本地生成、详情页记录由 `recordTurnStart` 先建好 —— 所以无需等任何 CLI 产出;尾随的 `…` 表示"正文还没到",正文到位时整条内容被 `链接 正文` 覆盖,始终没正文则以纯链接收口。此前是"3s 无产出才补链接"的 `earlyTimer`,既被 codebuddy 后端整体跳过,又会被 `user_text` 清表,实际常年不触发,气泡整轮停在纯文本占位上。
 - `mirror` 分页预算改按**字节**计,单页上限抬到 3800B(`wrc.mirror.chunkChars` → `chunkBytes`,默认 `1800` → `3800`)。企微 markdown 的 `content` 上限是 4096 **字节**而非字符,旧的字符预算对英文浪费了大半页,对中文又必然超限;`shared/md-chunk` 的 `sizeOf` / `sliceLine` 同步改成 `Buffer.byteLength` 计量,长行按 code point 切(不再切断 emoji 代理对)。头部分片预留 32 → 64B(链接态 `[🧙 #tag](url)` 可达 110B)。
-- `mirror` brief 模式: **工具阶段先把详情链接流进气泡, 不收口**, 最终正文到达时以 `链接 正文` 收口。此前气泡在工具阶段就收成一条纯链接, 正文只能另开 standalone 补发 —— 一轮变两条气泡。
+- `mirror` brief 模式: **气泡不再按"有无工具"分岔**。此前无工具的 turn 以 `正文\n\n链接` 收口(经 `withLinkedTag` 再包一次头,群里出现两个链接),有工具的走另一条路;现在统一为 `链接 正文`,`briefHadTool` 只用于判断 slash 命令的 `skill_output` 是不是本轮答案。
 
 ### Removed
 - `mirror` **think-style 实验下线**: `wrc.mirror.thinkStyle` 及 `pushThink` / `doStreamThink` / `formatThinkStandalone` 全套移除(`<think>` 折叠区、standalone 的 `💭` 传输标记、`parseTagHeader` 的 `<think>` 剥离一并清掉), 实验代码保留在 `backup/think-style` 分支。
