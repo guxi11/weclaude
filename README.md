@@ -192,7 +192,7 @@ tagged session 的每条回复自带 `emoji #tag` 前缀（emoji 由 tag 名 has
 
 **tag 语法**：`[\p{L}\p{N}_-]{1,32}`，支持中英文数字与 `_`、`-`；一条消息里只识别**第一个** `#tag`，后续的 `#foo` 原样透传给 Claude（不会误伤代码里的 `#include` 或 issue 引用）。
 
-**cwd 是聊天级的，不是 session 级**：同一聊天里所有 tagged / 默认 session **共用**一个 cwd。`/new #foo` 会在**当前聊天绑定的 cwd** 下起 pane；任意 session 里让 AI 调 `cd` MCP，写入的 pendingCwd 也挂在聊天层，下次 `/new`（无论带不带 tag）都会读到。这样多 session 天然对齐到同一个项目根，切换 tag 时不用重新指路径。
+**cwd 是聊天级的，不是 session 级**：同一聊天里所有 tagged / 默认 session **共用**一个 cwd。`/new #foo` 会在**当前聊天绑定的 cwd** 下起 pane；换项目直接对 AI 说「切到 /path/to/proj」，它调 `set_workspace` MCP **一步到位**——杀掉当前 pane、在新 cwd 重开新会话（等价于 `cd` 后从企微侧发 `/new`），聊天里以新会话的 📂 项目回执为准，上下文不延续。这样多 session 天然对齐到同一个项目根，切换 tag 时不用重新指路径。
 
 ---
 

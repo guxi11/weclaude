@@ -2,6 +2,14 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Changed
+- MCP: **`enter` → `set_workspace`，换项目一步到位**。旧 `enter` 只写 pendingCwd、还要人去企微侧补发 `/new` 才生效；`set_workspace` 在 daemon 内部直接走完 `/new` 路径（`setPendingCwd` → 杀 pane → 新 cwd 重开 → attach → 📂 项目回执），等价于「cd 之后用户发了 /new」。调用方就是被换掉的会话时会被当场终止（工具结果不返回，回执气泡即凭证）；spawn 失败时切换仍留在 pendingCwd，手动 `/new` 可兜底。daemon 路由 `POST /mirror/cwd` → `POST /mirror/workspace`，`/pwd` 提示、tips、README、技术说明同步更新。
+
+### Removed
+- MCP `enter` 工具与 `POST /mirror/cwd` 写路由（读取用的 `GET /mirror/cwd` 保留），由 `set_workspace` / `POST /mirror/workspace` 取代。
+
 ## [1.3.3] - 2026-09-02
 
 ### Changed

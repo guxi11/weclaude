@@ -154,20 +154,21 @@ server.registerTool(
   },
 );
 
-// cd — bind a per-chat project cwd in the daemon's mirror store. Doesn't
-// move the live claude (cwd is set at pane spawn time); instead writes to
-// `pendingCwd`. Apply only fires for `/clear` or `/new` sent **from the
-// WeCom side** — that's the only path that goes through `dispatch` where
-// the kill-pane + respawn-in-pendingCwd upgrade lives (mirror-bridge.ts
-// `dispatch` armMigration branch). A `/clear` typed in the local REPL just
-// rotates claude's sessionId in the same pane; the daemon never sees it
-// and the pane stays in the old cwd.
+// set_workspace — one-shot project switch. Replaces the old `enter` tool's
+// two-step dance (queue pendingCwd, then ask a human to send `/new` from the
+// WeCom side): the daemon applies the switch itself by walking the exact /new
+// path — setPendingCwd → kill pane → respawn in the new cwd → attach →
+// "📂 当前项目" push. NOTE: when the caller IS the chat's session being
+// replaced (the common case), its own pane is killed mid-tool-call — the tool
+// result never returns, and the project-info bubble in the chat is the
+// receipt. On spawn failure the pendingCwd stays queued, so a manual /new
+// from WeCom still completes the switch.
 server.registerTool(
-  "enter",
+  "set_workspace",
   {
-    title: "Enter project directory",
+    title: "Switch workspace directory",
     description:
-      "Persist a project cwd binding for the WeCom chat that mirrors this Claude session. To apply: send `/clear` or `/new` FROM THE WECOM SIDE — only WeCom-originated commands flow through the daemon's dispatch which kills+respawns the pane in the new cwd. A `/clear` typed in the local Claude REPL does NOT apply the cwd switch; it only rotates the sessionId in the existing pane (still in the old directory). Use absolute paths (or paths starting with ~).",
+      "Switch this chat's Claude session to a different project directory in ONE shot: kill the current pane and spawn a FRESH session rooted at the given cwd — exactly what the user gets by sending `/new` from the WeCom side after a `cd`. The chat receives the new session's 📂 project-info bubble as the receipt; conversation context is NOT carried over (fresh session, same as /new). If the caller is the session being replaced it is terminated mid-call — expected, the bubble is the receipt. Use absolute paths (or paths starting with ~).",
     inputSchema: {
       cwd: z.string().describe("Absolute project path, e.g. /Users/foo/projects/bar. ~ is expanded."),
       target: z
@@ -179,13 +180,9 @@ server.registerTool(
     },
   },
   async ({ cwd, target }) => {
-    const sessionId = process.env.CLAUDE_CODE_SESSION_ID ?? process.env.CLAUDE_SESSION_ID ?? "";
-    // sessionId in our env is frozen at MCP spawn; a `/clear` rotates the live
-    // session, stranding pendingCwd on defaultChat. TMUX_PANE is stable across
-    // clears, so send it as the reliable fallback key.
-    const tmuxPane = process.env.TMUX_PANE?.trim();
+    const { sessionId, tmuxPane } = selfRef();
     const normalizedTarget = normalizeTarget(target);
-    const resp = await fetch(`${DAEMON_BASE}/mirror/cwd`, {
+    const resp = await fetch(`${DAEMON_BASE}/mirror/workspace`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -195,15 +192,11 @@ server.registerTool(
         ...(tmuxPane ? { tmuxPane } : {}),
       }),
     });
-    const j = (await resp.json().catch(() => ({}))) as { ok?: boolean; reason?: string; target?: string; runningCwd?: string; pendingCwd?: string };
-    if (!j.ok) return fail(`cd failed: ${j.reason ?? "unknown"}`);
-    return ok({
-      ok: true,
-      target: j.target,
-      runningCwd: j.runningCwd,
-      pendingCwd: j.pendingCwd,
-      hint: "Send `/clear` or `/new` FROM THE WECOM SIDE to apply. Local-REPL `/clear` will NOT switch cwd — only WeCom-originated commands flow through the daemon's kill-pane + respawn-in-pendingCwd path.",
-    });
+    const j = (await resp.json().catch(() => ({}))) as { ok?: boolean; reason?: string; target?: string; sessionId?: string; cwd?: string; pendingCwd?: string };
+    if (!j.ok) {
+      return fail(`set_workspace failed: ${j.reason ?? "unknown"}${j.pendingCwd ? ` (switch queued for ${j.pendingCwd} — send /new from WeCom to apply)` : ""}`);
+    }
+    return ok({ ok: true, target: j.target, sessionId: j.sessionId, cwd: j.cwd });
   },
 );
 

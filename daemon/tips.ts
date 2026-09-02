@@ -15,7 +15,7 @@ const TIPS: readonly string[] = [
   "`/stop` 打断当前生成，`/n` 补一个回车",
   "`/usage` 看真实订阅额度 %，`/cost` 看 token 成本估算",
   "`/audit` 看本会话（含 subagent）的 token / 成本明细",
-  "换项目：让 AI 调 `cd` MCP 工具，然后 `/new` 或 `/clear` 生效",
+  "换项目：对 AI 说「切到 /path/to/proj」，`set_workspace` 一步换目录重开会话",
   "直接发图片即可，会自动粘进 CLI 输入框",
   "引用自己发过的命令再发一次，可以绕开微信的相同文本去重",
   "对 AI 说「订阅 xxx」「每天8点广播 xxx: …」即可做事件订阅 / 定时播报（走 MCP 工具）",

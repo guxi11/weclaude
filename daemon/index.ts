@@ -282,7 +282,7 @@ const main = async (): Promise<void> => {
     // Which chat is the caller? An MCP tool can only see its own process, so
     // every route an agent drives has to be told: explicit target → sessionId
     // → tmuxPane (stable across `/clear`, which rotates sessionId) → the
-    // configured defaultChat. Same precedence as /mirror/cwd.
+    // configured defaultChat. Same precedence as /mirror/workspace.
     const resolveSelf = (b: Partial<{ target: string; sessionId: string; tmuxPane: string }>): string => {
       const explicit = (b.target ?? "").trim();
       if (explicit) return explicit;
@@ -426,13 +426,16 @@ const main = async (): Promise<void> => {
       const r = await m.injectText(target, text);
       json(res, r.ok ? 200 : 500, r);
     });
-    // Per-chat project-path binding. POST sets the "next" cwd that /new (and
-    // /clear with mismatch) will spawn in; GET reads the current bindings.
-    // Resolved target precedence: explicit body.target → sessionId-derived
-    // (so MCP can omit it) → cfg.defaultChat. Sender of the call (MCP) is
-    // typically running inside a claude that's already attached, so passing
-    // sessionId is the cleanest way to identify the right chat.
-    http.register("POST /mirror/cwd", async (req, res) => {
+    // One-shot project switch: bind the chat-wide cwd AND apply it right here
+    // by walking the exact /new path (kill pane → respawn in pendingCwd →
+    // attach → "📂 当前项目" push). Replaces the old two-step /mirror/cwd +
+    // human-sent /new that the `enter` MCP tool required. Resolved target
+    // precedence: explicit body.target → sessionId-derived (so MCP can omit
+    // it) → tmuxPane (stable across /clear) → cfg.defaultChat. When the caller
+    // IS the session being replaced, its pane dies mid-tool-call — the
+    // project-info bubble is the receipt. On spawn failure the pendingCwd
+    // stays queued, so a manual /new from WeCom still completes the switch.
+    http.register("POST /mirror/workspace", async (req, res) => {
       const { readBody } = await import("./http.js");
       const body = (await readBody(req)) as Partial<{ target: string; sessionId: string; tmuxPane: string; cwd: string }>;
       const cwd = (body.cwd ?? "").toString();
@@ -450,8 +453,15 @@ const main = async (): Promise<void> => {
       if (!target) target = (cfg.defaultChat ?? "").trim();
       if (!target) { json(res, 400, { ok: false, reason: "target required (or pass sessionId of an attached chat)" }); return; }
       if (!cwd) { json(res, 400, { ok: false, reason: "cwd required" }); return; }
-      const r = m.setPendingCwd(target, cwd);
-      json(res, r.ok ? 200 : 400, { ...r, target });
+      const set = m.setPendingCwd(target, cwd);
+      if (!set.ok) { json(res, 400, { ...set, target }); return; }
+      // Same shape as inbound's /new: windowName = tag for tagged sessions,
+      // principal for the default one. No explicit cwd — newSession reads the
+      // pendingCwd just queued and clears it once applied.
+      const r = await m.newSession(target, tagOfKey(target) || target, undefined, {});
+      json(res, r.ok ? 200 : 500, r.ok
+        ? { ok: true, target, sessionId: r.sessionId, cwd: r.cwd }
+        : { ok: false, reason: r.reason, target, runningCwd: set.runningCwd, pendingCwd: set.pendingCwd });
     });
     // ── Peer collaboration + loop graph ────────────────────────────────
     // These routes let the Claude inside one pane act on its SIBLINGS: the

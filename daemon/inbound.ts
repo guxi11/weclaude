@@ -525,7 +525,7 @@ export const installInboundRouter = (
         lines.push(`下次切换: \`${pendingCwd}\` (使用 /new 或 /clear 生效)`);
       }
       if (runningCwd !== defaultCwd) lines.push(`(默认: \`${defaultCwd}\`)`);
-      lines.push("> 切换其他项目: 让 AI 调用 `cd` MCP 工具");
+      lines.push("> 切换其他项目: 对 AI 说「切到 /path/to/proj」(`set_workspace` 工具直接换目录重开)");
       return lines.join("\n");
     }
     return `[wezard] 📂 当前项目: \`${expandHome(cfg.wrc.cwd)}\` (headless mode, 全局默认)`;
