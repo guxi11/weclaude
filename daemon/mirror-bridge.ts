@@ -1714,7 +1714,7 @@ interface BriefBubble {
   done: boolean;
 }
 
-/** 已经 ack 过 (气泡挂出去了)、turn 记录也建好了, 但还没轮到它当活跃 turn。 */
+/** turn 记录已建好、气泡已 ack 的 turn 载体 (turnId / 气泡 / slash 标记)。 */
 interface QueuedTurn {
   turnId: string;
   bubble: BriefBubble;
@@ -1816,10 +1816,6 @@ interface AttachState {
    *  时才定最终内容: 无工具→直接把结论写进这个气泡; 有工具→写详情链接 (结论另发
    *  standalone)。hardTimer 兜底 WeCom ~6min stream 窗口, 到点强制收口。 */
   briefBubble?: BriefBubble;
-  /** 尚未激活的 turn。上一 turn 还在跑时又收到 WeCom 消息 —— CC 会把它排进自己的队列,
-   *  要等当前轮结束才处理, 所以这边也必须排队: 强关当前 turn 会把仍在产出的后半轮
-   *  改挂到新 turn 上 (旧 turn 页提前变「已完成」)。closeBriefTurn 顺序放行。 */
-  briefQueue?: QueuedTurn[];
   /** 本 turn 是否出现过工具调用 / 非 final 文本 —— 决定 skill_output 是当答案写进气泡
    *  还是当中间反馈独立发。详情链接本身与它无关: 气泡从 ack 起就带着链接。 */
   briefHadTool?: boolean;
@@ -2428,7 +2424,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   };
 
   // 收口一条 loading 气泡: finish=true 写入最终内容, 只生效一次。发送失败退回 standalone。
-  // 排队中的 turn 也持有气泡, 所以气泡是显式入参而不是从 a 上取。
   // raw=true skips withSessionTag (used when content already contains the linked tag header).
   // WeCom 客户端收到 finish=true 后仍有打字机动画要播放, 如果紧接着就下发
   // standalone (sendMessage), 用户会看到 standalone 抢在气泡动画结束之前出现。
@@ -2471,10 +2466,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     log.info({ sessionId: a.sessionId, turnId: q.turnId, isSlash: q.isSlash }, "brief: turn started");
   };
 
-  // WeCom 侧发起一个 turn: 立刻挂 loading 气泡当 ack, 再决定是马上激活还是排队。
-  // 上一 turn 还在跑时绝不能强关它 —— CC 那边新消息也是排队的, 当前轮的后半段还会
-  // 继续落盘, 强关会把它们改挂到新 turn 上, 旧 turn 页则提前变「已完成」。
-  // 断点是一次性的: 只归给断点后的第一轮, 之后的轮次上下文又连续了。
+  // WeCom 侧发起一个 turn。断点是一次性的: 只归给断点后的第一轮, 之后的轮次上下文又连续了。
   const consumeCut = (a: AttachState): CtxCut | undefined => {
     const cut = a.ctxCut;
     a.ctxCut = undefined;
@@ -2498,25 +2490,19 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const bubble: BriefBubble = { frame, streamId, hardTimer: undefined as unknown as NodeJS.Timeout, done: false };
     const q: QueuedTurn = { turnId, bubble, isSlash };
     bubble.hardTimer = setTimeout(() => {
-      // 到点还在排队 = 前一个 turn 卡死或漏收 turn_end。强关它放行 —— 队列必须能自愈,
-      // 否则这条消息的产出会一直记到那个僵尸 turn 上。气泡此时已过 WeCom 更新窗口,
-      // 收成详情链接即可, 真正要紧的是让本 turn 激活。
-      if (a.briefQueue?.includes(q)) {
-        log.warn({ sessionId: a.sessionId, turnId }, "brief: queued turn timed out — force-closing the stuck one");
-        closeBriefTurn(a);
-      }
       // WeCom ~6min stream 窗口快到, 必须 finish=true 收口。
       void finishBubble(a, bubble, briefDetailLink(turnId, a.target), true);
     }, HARD_TIMEOUT_MS);
-    if (a.briefTurnId) {
-      (a.briefQueue ??= []).push(q);
-      log.info({ sessionId: a.sessionId, turnId, queued: a.briefQueue.length }, "brief: turn queued (previous still running)");
-    } else {
-      openBriefTurn(a, q);
-    }
+    // 新消息 = 对话边界: 立刻收掉上一 turn (气泡以详情链接收口), 新 turn 直接
+    // 激活、不排队。旧 turn 在 CLI 侧的剩余产出自然流入新气泡 —— "新回复走最新
+    // 气泡"正是这个语义。代价是旧 turn 页提前标完、尾部 item 记到新 turn 名下,
+    // 但远小于排队的代价: 排队 turn 的 frame 在前一个长 turn 期间 (可达数分钟)
+    // 过期, 激活后 replyStream 全被 WeCom 拒收 (#stream 事故的静默根因)。
+    if (a.briefTurnId) closeBriefTurn(a);
+    openBriefTurn(a, q);
     // ack 即详情链接。URL 的三个入参 (turnId / target / host) 在收消息这一刻全部已知 ——
     // turnId 是本地生成的, 详情页记录也已在 recordTurnStart 建好, 所以不必等 CLI 产出,
-    // 也不必猜后端: 排队中的轮、codebuddy 那种几十秒后才落盘的轮, 入口都在。
+    // 也不必猜后端: codebuddy 那种几十秒后才落盘的轮, 入口从第一秒就在。
     // 尾随 `…` 表示"正文还没到", 正文到位时整条内容被 `链接 正文` 覆盖。
     try {
       await client.replyStream(frame, streamId, `${briefDetailLink(turnId, a.target)} …`, false);
@@ -2566,9 +2552,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     } else {
       sendStandalone(a, body);
     }
-    // 排队中的 turn 已经建了记录但还没跑, 不能被这把扫帚扫成「已完成」。
-    const keep = [turnId, ...(a.briefQueue ?? []).map((q) => q.turnId)];
-    recordCloseOpenTurns({ target: a.target, sessionId: a.sessionId, exceptIds: keep });
+    // 只保留当前 turn: 其余仍开着的 turn 记录是漏收的 close, 一并扫掉。
+    recordCloseOpenTurns({ target: a.target, sessionId: a.sessionId, exceptIds: [turnId] });
   };
 
   /** soft=true: 收口信号来自静默期确认 (后端无终句标记), 拿本轮最后一句 text 当结论。
@@ -2589,9 +2574,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.briefConcluded = false;
     a.briefLastText = undefined;
     clearCot(a);
-    // 放行下一个排队的 turn —— 它的气泡早在 ack 时就挂出去了, 这里只是激活。
-    const next = a.briefQueue?.shift();
-    if (next) openBriefTurn(a, next);
   };
 
   // 强制收口一个 attachment 的全部出站通道, 并返回收掉的气泡/流条数。
@@ -2603,14 +2585,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // 状态的清算, Esc 之类要碰 pane 的动作留给调用方在这之后自己尽力去做。
   const teardownOutbound = (a: AttachState, note?: string): number => {
     let closed = 0;
-    // 排队中的 turn 先清空再动当前 turn —— 反序会让 closeBriefTurn 顺手 shift
-    // 一个僵尸 turn 上来当活跃 turn, 白收一遍。
-    for (const q of a.briefQueue ?? []) {
-      closed++;
-      void finishBubble(a, q.bubble, briefDetailLink(q.turnId, a.target), true);
-      recordTurnClose(q.turnId);
-    }
-    a.briefQueue = [];
     if (a.briefTurnId) {
       closed++;
       closeBriefTurn(a);
@@ -2746,9 +2720,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const banner = goalBanner(condition);
     if (a.briefBubble && !a.briefBubble.done) void finishBriefBubble(a, banner);
     else enqueueStandalone(a, banner);
-    // 连同排队中的 turn 一起收掉: goal 期间所有 item 走 handleGoalItem, 排队的 turn
-    // 永远等不到自己的产出。closeBriefTurn 会逐个放行再关闭, 每个都留下详情链接。
-    while (a.briefTurnId) closeBriefTurn(a); // bubble now done → closeBriefTurn skips re-finalizing
+    // 活跃 brief turn 也收掉: goal 期间所有 item 走 handleGoalItem, 它永远等不到
+    // 自己的 turn_end。气泡已 done → closeBriefTurn 不会重复收口。
+    if (a.briefTurnId) closeBriefTurn(a);
     a.goalActive = true;
     log.info({ sessionId: a.sessionId, target: a.target, condition }, "goal: entered progress mode");
   };
@@ -3053,7 +3027,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (a.outbound?.kind === "deferred") clearTimeout(a.outbound.timer);
     a.outbound = undefined;
     if (a.softEnd) { clearTimeout(a.softEnd); a.softEnd = undefined; }
-    while (a.briefTurnId) closeBriefTurn(a); // 活跃 + 排队中的 turn 全部收掉
+    if (a.briefTurnId) closeBriefTurn(a); // 活跃 turn 收掉 (队列已随对话边界策略移除)
     if (a.liveStream && !a.liveStream.closed) void finalizeStream(a, a.liveStream);
     if (a.standaloneBuf) { clearTimeout(a.standaloneBuf.timer); flushStandalone(a); }
     a.tail.stop();
@@ -4754,13 +4728,18 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // 记下断点, 由下一轮 (第一轮读不到上文的轮次) 领走。/clear 自己不建 turn,
       // 否则这次清空在 chat 详情里毫无痕迹, 前后两轮看着还是连续的。
       if (armMigration) a.ctxCut = "clear";
-      // Drop any prior turn's outbound deferral state — a new dispatch always
-      // supersedes whatever was buffered/awaiting. The old frame is dead by our
-      // own choice (we won't write to it anymore); the user might still later
-      // click an old approval card, but terminateLiveStream will find no
-      // matching outbound slot and no-op gracefully.
+      // 新消息 = 对话边界: 上一 turn 的出站状态在此清算。softEnd 是旧 turn 的
+      // 静默期收口判决, 残留到新 turn 会在中途开火、提前收掉新气泡/新流;
+      // deferred 缓冲里是已从 tail 消费但还没下发的 item, 直接丢弃 = 静默丢失,
+      // 冲成 standalone 收尾。旧 frame 就此作废; 用户之后点旧审批卡,
+      // terminateLiveStream 找不到 outbound 槽位会优雅 no-op。
+      if (a.softEnd) { clearTimeout(a.softEnd); a.softEnd = undefined; }
       if (a.outbound) {
-        if (a.outbound.kind === "deferred") clearTimeout(a.outbound.timer);
+        if (a.outbound.kind === "deferred") {
+          clearTimeout(a.outbound.timer);
+          const md = renderBuf(a.outbound.buf);
+          if (md) sendStandalone(a, md);
+        }
         a.outbound = undefined;
       }
       // Drain any pending standalone debounce so a prior turn's tail tail
@@ -4789,7 +4768,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         }
       }
       if (brief) {
-        // 挂 loading 气泡并起新 turn (上一 turn 还在跑则排队, 由它收口时放行)。
+        // 挂 loading 气泡并起新 turn —— 上一 turn 若还在跑, startBriefTurn 内部
+        // 会立刻把它收掉 (对话边界策略), 本轮直接成为活跃 turn。
         // 后续 onItem 走 handleBriefItem, 不再走 stream / defer 路径。
         await startBriefTurn(a, frame, streamId, isSlash, text);
       } else if (!armMigration && !eagerOpen) {
