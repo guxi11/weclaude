@@ -2377,10 +2377,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const COT_FLUSH_MS = 1500;
 
   // 压成一行的进度片段。safeForMarkdown 必须先于截断: thinking 里一个裸反引号就能提前
-  // 闭合代码段, 让后面的正文裸奔在链接旁边。
+  // 闭合代码段, 让后面的正文裸奔在链接旁边。尾随的省略号 = "还在进行中"; 截断与进行中
+  // 共用同一个 …, 不叠加两个。
   const cotLine = (s: string): string => {
     const flat = safeForMarkdown(s.replace(/\s+/g, " ").trim());
-    return flat.length <= COT_MAX_CHARS ? flat : `${flat.slice(0, COT_MAX_CHARS)}…`;
+    return flat ? `${flat.slice(0, COT_MAX_CHARS)}…` : "";
   };
 
   const cotToolLabel = (calls: Array<{ name: string; input: unknown }>): string =>
