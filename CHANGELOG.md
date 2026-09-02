@@ -2,7 +2,7 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [1.3.1] - 2026-09-02
 
 ### Changed
 - `mirror`: **对话边界收口不再凭空新发/覆盖消息**。连续发消息触发上一轮的强制结束时:(a) 有正文才写 —— brief 气泡以 `链接 正文` 收口、非 brief 的 liveStream 以累积 acc 收口、deferred 缓冲收入旧 streamId(`finish=true` 顺带关掉它的 loading 气泡),不再整体另发 standalone;(b) 没正文一个字都不写 —— 旧代码的裸链接/`" "` 空收口会把 `链接 …`/CoT 进度行整条覆盖掉,结束处理自己制造错发,现在气泡保持现有内容由企微 6min 窗口自然到期。`closeBriefTurn` 软/硬/边界三路统一为先 `concludeBriefTurn(briefLastText)` 再清态,`soft` 形参移除。
@@ -287,7 +287,9 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v1.2.31...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.1...HEAD
+[1.3.1]: https://github.com/guxi11/wezard/compare/v1.3.0...v1.3.1
+[1.3.0]: https://github.com/guxi11/wezard/compare/v1.2.31...v1.3.0
 [1.2.31]: https://github.com/guxi11/wezard/compare/v1.2.30...v1.2.31
 [1.2.30]: https://github.com/guxi11/wezard/compare/v1.2.29...v1.2.30
 [1.2.29]: https://github.com/guxi11/wezard/compare/v1.2.28...v1.2.29
