@@ -45,8 +45,10 @@ const Mirror = z.object({
   sessionId: z.string().default(""),
   // Where to push live assistant output. Empty → fall back to defaultChat.
   pushChat: z.string().default(""),
-  // Cap a single push payload (WeCom markdown ~2048 limit). Long replies are split.
-  chunkChars: z.number().int().positive().default(1800),
+  // Cap a single push payload in BYTES (WeCom markdown caps `content` at 4096
+  // UTF-8 bytes). Long replies are split into that many bytes per page, minus
+  // the tag header. Shared/md-chunk measures in bytes too — CJK is 3 bytes/char.
+  chunkBytes: z.number().int().positive().default(3800),
   // Mirror the user's CLI prompts (type:"user" with string content). Off by
   // default: WeCom-sourced inbounds get dedup'd anyway, and local CLI typing
   // is rare in the bot-driven flow — keeping it on mostly produced echo noise.
@@ -98,10 +100,6 @@ const Mirror = z.object({
   // 中间 tool_use / tool_result / thinking / 非 final text 全部只写进详情页,不发气泡。
   // 授权卡照常发群 (交互无法替代)。false = 现状 (逐条气泡)。
   brief: z.boolean().default(true),
-  // Think style (brief 模式下生效): 开启后本轮的 thinking 不再只进详情页,而是把整段
-  // 思考以 `<think>…</think>` 前缀拼进最终答复气泡: `<think>xxx</think>\n\nfinal reply`。
-  // 关闭 (默认) = 现状: thinking 只写详情, 聊天只见最终答复。
-  thinkStyle: z.boolean().default(false),
   // 软收口静默期 (ms)。codebuddy 后端只能说"这条消息写完了", 等这么久没有新 item
   // 才认定一轮结束。值越大越不容易误收 (model 思考时间长), 但用户等最终结论的延迟也
   // 越大。不设则按后端自动选择: codebuddy 10s, claude 4s。

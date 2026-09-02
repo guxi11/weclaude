@@ -254,9 +254,6 @@ interface TailDeps {
   log: Logger;
   includeUser: boolean;
   includeTools: boolean;
-  /** Emit `thinking` RenderItems from thinking blocks (brief think-style). When
-   *  false the parser skips them entirely (现状 — 只进详情, 不下发)。 */
-  thinkStyle: boolean;
   includeToolResults: boolean;
   toolResultMaxChars: number;
   toolUseInlineMaxChars: number;
@@ -458,9 +455,6 @@ const DETAIL_RESULT_MAX = 64 * 1024;
 // of band on the item so the caller can register them for click-to-detail.
 type RenderItem =
   | { kind: "text"; body: string; final?: boolean }
-  // Assistant thinking block. Only emitted when thinkStyle is on. Accumulated
-  // across the turn and prepended as `<think>…</think>` to the final reply bubble.
-  | { kind: "thinking"; body: string }
   // CLI-side user line (not a WeCom inject). Marks a turn boundary that did
   // NOT originate from the still-open WeCom liveStream — onItem uses this to
   // finalize the prior bubble so the new conversation gets its own bubble.
@@ -499,19 +493,6 @@ type RenderItem =
 const oneLineSummary = (s: string, max = 40): string => {
   const flat = s.replace(/\s+/g, " ").trim();
   return truncate(flat, max);
-};
-
-// think-style 收口去重: 软后端最终正文会先作为非 final 文本进 briefThinking, 收口
-// 再当正文用一次。剥掉 think 尾部恰好等于 body 的那段 (含其前的 \n\n 分隔), 让正文
-// 只出现在 </think> 之后。只剥完整尾段, 中途出现过的同句子片段不动 —— 那是真的思考。
-const stripTrailingBody = (think: string | undefined, body: string): string | undefined => {
-  if (!think || !body) return think || undefined;
-  if (think === body) return undefined;
-  if (think.endsWith(body)) {
-    const cut = think.slice(0, think.length - body.length).replace(/\n{2,}$/, "").trimEnd();
-    return cut || undefined;
-  }
-  return think;
 };
 
 // WeCom's markdown sanitizer strips HTML-like `<...>` runs even inside inline
@@ -716,19 +697,14 @@ const renderLine = (raw: string, deps: TailDeps): RenderItem[] => {
         flushPending();
         const t = b.text.trim();
         if (t && !deps.isOwnAssistantSend?.(t)) out.push({ kind: "text", body: t, final: textFinal });
-      } else if (b?.type === "tool_use" && (deps.includeTools || deps.thinkStyle)) {
+      } else if (b?.type === "tool_use" && deps.includeTools) {
         const name = b.name ?? "tool";
         const toolUseId = b.id ?? "";
         // 同名扩展当前 group; 不同名先 flush 再起新组。
         if (pending.length > 0 && pending[0]!.name !== name) flushPending();
         pending.push({ toolUseId, name, input: b.input });
-      } else if (b?.type === "thinking" && deps.thinkStyle) {
-        flushPending();
-        const raw = typeof b.thinking === "string" ? b.thinking : typeof b.text === "string" ? b.text : "";
-        const t = raw.trim();
-        if (t) out.push({ kind: "thinking", body: t });
       }
-      // thinking blocks otherwise intentionally skipped (只进详情页)
+      // thinking blocks intentionally skipped (只进详情页)
     }
     flushPending();
     // Emit per-line usage snapshot BEFORE turn_end so brief store gets the last
@@ -809,8 +785,9 @@ const renderLine = (raw: string, deps: TailDeps): RenderItem[] => {
 // fenced block or table in a way that breaks rendering — see splitMarkdown.
 const splitChunks = splitMarkdown;
 
-// Room reserved in every chunk for the `emoji \`#tag\` \`2/5\`` header line.
-const TAG_HEADER_BUDGET = 32;
+// Room reserved in every chunk for the `emoji \`#tag\` \`2/5\`` header line
+// (up to ~110 bytes in its linked `[🧙 #tag](url)` form).
+const TAG_HEADER_BUDGET = 64;
 
 interface TailHandle {
   stop: () => void;
@@ -1730,10 +1707,6 @@ interface BriefBubble {
   /** 3s 早收口: inject 后若无 CLI 产出, 先把气泡收成详情链接。首条 item 到达即清。 */
   earlyTimer?: NodeJS.Timeout;
   done: boolean;
-  /** think-style: 首条 replyStream 尚未发出 —— 延迟到首个 content 到达时再开流,
-   *  避免 openBriefTurn 的空 `<think>` 与紧随的 pushThink 产生两次快速 replyStream
-   *  导致 WeCom 服务端合并/丢弃 (off-by-one bug)。 */
-  streamPending?: boolean;
 }
 
 /** 已经 ack 过 (气泡挂出去了)、turn 记录也建好了, 但还没轮到它当活跃 turn。 */
@@ -1787,7 +1760,7 @@ interface AttachState {
   standalonePending: Promise<void>;
   /** Debounce buffer for the standalone fallback path. liveStream 活时为 undefined,
    *  fallback 落入时累积 item.body, debounce 窗口结束统一发出, 抑制工具调用刷屏。 */
-  standaloneBuf?: { parts: string[]; timer: NodeJS.Timeout; bodyWaitLen?: number };
+  standaloneBuf?: { parts: string[]; timer: NodeJS.Timeout };
   /** 刚由 newSession 铸出的 pane —— TUI 只有 TUI_SETTLE_MS 那么大。首条 inject
    *  必须用冷启动时序,否则 paste 校验会在 TUI 抓到 pty 之前超时并重贴一次,
    *  两次 paste 最终都落进输入框 = 提示词重复。一次性,由第一次 dispatch 消费。 */
@@ -1844,18 +1817,14 @@ interface AttachState {
   briefQueue?: QueuedTurn[];
   /** 本 turn 是否出现过 tool_use —— 决定气泡收口写结论还是写详情链接。 */
   briefHadTool?: boolean;
+  /** 详情链接已流进气泡 —— 气泡保持打开等正文。 */
+  briefDetailStreamed?: boolean;
   /** 本 turn 由 slash 命令 (/context…) 触发 —— 其 skill_output 即答案, 写进气泡而非 standalone。 */
   briefIsSlash?: boolean;
   /** 本 turn 的结论是否已经落地 (写进气泡或发了 standalone), 防止软收口重复推送。 */
   briefConcluded?: boolean;
   /** 本 turn 最近一条 assistant text。软收口没有"终句"标记, 收口时拿它当结论。 */
   briefLastText?: string;
-  /** 本 turn 累积的 thinking (think-style 开启时)。收口时拼成 `<think>…</think>` 前缀。 */
-  briefThinking?: string;
-  /** think-style 去抖: 等 FLUSH_MS 再发 replyStream, 把多次 pushThink 压成一次。 */
-  thinkFlushTimer?: NodeJS.Timeout;
-  /** think-style 背压: 上一次 replyStream 尚未完成时挡住新 flush。 */
-  thinkFlushing?: boolean;
   /** 软收口的静默期计时器 —— 任何新 item 到达即撤销。 */
   softEnd?: NodeJS.Timeout;
   // thinkRescueTimer removed: softEnd (10s silence) + hardTimer (350s) already
@@ -1920,8 +1889,6 @@ type OutboundState =
 
 export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const { cfg, log, client } = deps;
-  // think-style: brief 模式下把 thinking 直接流进气泡, 且全程不下发任何详情链接。
-  const thinkStyle = cfg.wrc.mirror.thinkStyle && cfg.wrc.mirror.brief;
   // Multi-mirror: each (sessionId, target) pair is one Attachment. Same
   // sessionId reattaches → replace. Same target with different sessionId →
   // replace too (one WeCom chat can only show one mirror at a time).
@@ -2013,20 +1980,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     cfg.wrc.mirror.softTurnEndMs ?? (backendForPath(a.jsonlPath).name === "codebuddy" ? SOFT_TURN_END_DEFAULT_CB : SOFT_TURN_END_DEFAULT_CLAUDE);
   const STREAM_SOFT_CAP = 18_000;
   const TOOL_DETAIL_TTL_MS = 24 * 60 * 60 * 1000;
-  /** Standalone 发送前正文检查: 内容无正文 (纯 think 标记 / 工具行) 时,
-   *  回队列等这么久。期间有新消息入队则重置; 到期且无新消息才发出。 */
-  const STANDALONE_BODY_WAIT_MS = 8_000;
 
-  // 判断 standalone 内容是否含有正文 (非纯 <think>…</think> / 工具行)。
-  const standaloneHasBody = (content: string): boolean => {
-    // 剥掉 <think>…</think> 包裹 (含 tag header)
-    const stripped = content.replace(/<think>[\s\S]*?<\/think>/g, "")
-      // 工具行
-      .replace(/^🔧 .*/gm, "")
-      .replace(/^↳ .*/gm, "")
-      .trim();
-    return stripped.length > 0;
-  };
 
   // turnId → { tools, target, expiresAt } registry for click-to-detail lookups.
   interface TurnRecord {
@@ -2126,7 +2080,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // Linked tag prefix: emoji+tag becomes a chat-detail link. Falls back to
   // plain withSessionTag when no turnId is available (no active turn to link).
   const linkedTagPrefix = (target: string, turnId: string | undefined): string => {
-    if (thinkStyle) return "";  // think-style: 全程不带详情链接, 一律退回 withSessionTag。
     if (!turnId) return "";
     const url = buildChatUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, turnId, stripPrincipalPrefix(target));
     const tag = tagOfKey(target);
@@ -2144,7 +2097,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
 
   const sendStandalone = (a: AttachState, content: string): void => {
     const chatId = stripPrincipalPrefix(a.target);
-    const pieces = splitChunks(content, Math.max(200, cfg.wrc.mirror.chunkChars - TAG_HEADER_BUDGET));
+    const pieces = splitChunks(content, Math.max(200, cfg.wrc.mirror.chunkBytes - TAG_HEADER_BUDGET));
     const chunks = pieces.map((p, i) =>
       withLinkedTag(a, p, pieces.length > 1 ? `${i + 1}/${pieces.length}` : undefined));
     a.standalonePending = a.standalonePending
@@ -2195,49 +2148,15 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     }
   };
 
-  // thinkStyle 格式化: 将 merged standalone 内容分拣为 <think> 包裹的工具行和正文。
-  // 统一在发送层处理, pushThink / handleBriefItem 等上游只需发原始文本。
-  const formatThinkStandalone = (a: AttachState, merged: string): string => {
-    const lines = merged.split("\n");
-    const thinkLines: string[] = [];
-    const bodyLines: string[] = [];
-    for (const line of lines) {
-      if (line.startsWith("🔧 ") || line.startsWith("↳ ") || line.startsWith("💭 ")) thinkLines.push(line);
-      else bodyLines.push(line);
-    }
-    // `💭 ` 只是 pushThink 打在 standalone 路径上的传输标记 (让本函数认出 think 来源),
-    // 没有展示价值 —— 剥掉。🔧 / ↳ 是给用户的工具行标记, 保留。
-    const think = thinkLines.map((l) => l.replace(/^💭 /, "")).join("\n").trim();
-    const body = bodyLines.join("\n").trim();
-    if (think && body) return `${openThink(a.target, think)}</think>\n\n${body}`;
-    if (think) return `${openThink(a.target, think)}</think>`;
-    return body;
-  };
-
+  // thinkStyle 格式化已移除 — standalone 内容直接发送。
   // Debounce 聚合: 仅 standalone 路径用。窗口内 onItem 多次落入 → 合并成单条 markdown。
   // 0 关闭时退化为透传。flushStandalone 也用于 detach 时的 drain。
-  // 正文检查: 合并内容无正文 (纯 think/工具) 时, 回队列等 STANDALONE_BODY_WAIT_MS;
-  // 期间有新消息入队 (parts 增长) 则重置; 到期且无新消息才丢弃。
-  // force=true 跳过正文检查, 用于 teardown / detach / pre-card 等强制 drain 场景。
-  const flushStandalone = (a: AttachState, force = false): void => {
+  const flushStandalone = (a: AttachState, _force = false): void => {
     const buf = a.standaloneBuf;
     if (!buf) return;
     const merged = buf.parts.join("\n\n");
-    if (!force && !standaloneHasBody(merged)) {
-      if (buf.bodyWaitLen !== buf.parts.length) {
-        // 无正文 & 队列有新增 → 再等一轮, 看后续 item 是否带正文。
-        buf.bodyWaitLen = buf.parts.length;
-        buf.timer = setTimeout(() => flushStandalone(a), STANDALONE_BODY_WAIT_MS);
-        return;
-      }
-      // 8s 无新 item 且仍无正文 → 丢弃 (纯 think/工具行不值得单独发一条)。
-      a.standaloneBuf = undefined;
-      return;
-    }
     a.standaloneBuf = undefined;
-    // thinkStyle: 统一格式化 — 工具行包进 <think>, 正文留外面。
-    const content = thinkStyle ? formatThinkStandalone(a, merged) : merged;
-    if (content) sendStandalone(a, content);
+    if (merged) sendStandalone(a, merged);
   };
 
   const enqueueStandalone = (a: AttachState, content: string): void => {
@@ -2447,9 +2366,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const briefDetailLink = (turnId: string, target: string): string => {
     const url = buildChatUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, turnId, stripPrincipalPrefix(target));
     const tag = tagOfKey(target);
-    return tag
-      ? `[${labelFor(tag)} #${tag}](${url}) ← View chat details`
-      : `[🧙](${url}) ← View chat details`;
+    return tag ? `[${labelFor(tag)} #${tag}](${url})` : `[🧙](${url})`;
   };
 
   // 收口一条 loading 气泡: finish=true 写入最终内容, 只生效一次。发送失败退回 standalone。
@@ -2465,8 +2382,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     b.done = true;
     clearTimeout(b.hardTimer);
     if (b.earlyTimer) { clearTimeout(b.earlyTimer); b.earlyTimer = undefined; }
-    // think-style: 清除待发的 flush 定时器, 避免 doStreamThink 在 done 后空跑。
-    if (a.briefBubble === b && a.thinkFlushTimer) { clearTimeout(a.thinkFlushTimer); a.thinkFlushTimer = undefined; }
     if (a.briefBubble === b) a.briefBubble = undefined;
     const p = (async () => {
       try {
@@ -2485,70 +2400,15 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
 
   const finishBriefBubble = (a: AttachState, content: string, raw = false): Promise<void> => finishBubble(a, a.briefBubble, content, raw);
 
-  // think-style tag: 紧跟在 `<think>` 之后, 不在整条消息最前面 —— `<think>🧙 …`。
-  const thinkTag = (target: string): string => {
-    const tag = tagOfKey(target);
-    return tag ? `${labelFor(tag)} #${tag}` : "🧙";
-  };
-  const openThink = (target: string, think: string): string => `<think>${thinkTag(target)} ${think}`;
-
-  // think-style: 把当前累积的 thinking 作为 `<think>🧙 …` 流进活着的 loading 气泡
-  // (finish=false, 气泡不关)。收口时再补 `</think>\n\n<final>` 并 finish。
-  // raw 发送: tag 已在 <think> 内, 不再经 withSessionTag 外包。
-  // streamPending → 首次调用时才真正开流 (fix: off-by-one race)。
-  // fix: 加去抖 (FLUSH_MS) + 背压 (await 上一次完成), 消除 SDK 串行队列积压。
-  const doStreamThink = async (a: AttachState): Promise<void> => {
-    const b = a.briefBubble;
-    const think = a.briefThinking?.trim();
-    if (!b || b.done || !think) return;
-    // 首条 replyStream 延迟到这里发出 (streamPending), 携带真实内容, 避免空开流竞态。
-    b.streamPending = false;
-    try {
-      await client.replyStream(b.frame, b.streamId, openThink(a.target, think), false);
-      log.debug({ sessionId: a.sessionId, streamId: b.streamId, thinkLen: think.length }, "brief: think stream ok");
-    } catch (e) {
-      log.warn({ sessionId: a.sessionId, err: (e as Error).message }, "brief: think stream failed");
-    }
-  };
-  const scheduleThinkFlush = (a: AttachState): void => {
-    if (!a.briefBubble || a.briefBubble.done || a.thinkFlushTimer || a.thinkFlushing) return;
-    a.thinkFlushTimer = setTimeout(() => {
-      a.thinkFlushTimer = undefined;
-      if (a.thinkFlushing) return; // 上一次还在飞 → 下次 pushThink 再排
-      a.thinkFlushing = true;
-      void doStreamThink(a).finally(() => { a.thinkFlushing = false; });
-    }, FLUSH_MS);
-  };
-
-  // think-style 单一入口: 一段中间过程 (reasoning / 中途文本 / 工具调用) 进 think。
-  // 气泡还活 → 累积进 briefThinking 并排一次去抖 flush (replyStream);
-  // 气泡已收口 / 无气泡 → enqueueStandalone 即时推送 (自带 3s debounce 防抖合并)。
-  const pushThink = (a: AttachState, chunk: string): void => {
-    const c = chunk.trim();
-    if (!c) return;
-    if (a.briefBubble && !a.briefBubble.done) {
-      a.briefThinking = a.briefThinking ? `${a.briefThinking}\n\n${c}` : c;
-      scheduleThinkFlush(a);
-    } else if (a.briefTurnId) {
-      // 气泡已收口 / 无气泡 turn: 走 standalone, 避免长 turn 期间 chat 静默。
-      // 原始内容入队, flushStandalone 统一做 thinkStyle 格式化 (工具行→<think>, 其余→正文)。
-      // fix: thinkStyle 加 `💭 ` 前缀, formatThinkStandalone 才能识别为 think 行 (否则
-      // 纯 reasoning 被当 body 整段裸奔到 chat)。
-      enqueueStandalone(a, thinkStyle ? `💭 ${c}` : c);
-    }
-  };
-
   // 让一个已建好记录的 turn 成为活跃 turn。turn 级状态在这里统一归零 —— 唯一入口。
   const openBriefTurn = (a: AttachState, q: QueuedTurn): void => {
     a.briefTurnId = q.turnId;
     a.briefBubble = q.bubble;
     a.briefIsSlash = q.isSlash;
     a.briefHadTool = false;
+    a.briefDetailStreamed = false;
     a.briefConcluded = false;
     a.briefLastText = undefined;
-    a.briefThinking = undefined;
-    if (a.thinkFlushTimer) { clearTimeout(a.thinkFlushTimer); a.thinkFlushTimer = undefined; }
-    a.thinkFlushing = false;
     log.info({ sessionId: a.sessionId, turnId: q.turnId, isSlash: q.isSlash }, "brief: turn started");
   };
 
@@ -2586,32 +2446,22 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         log.warn({ sessionId: a.sessionId, turnId }, "brief: queued turn timed out — force-closing the stuck one");
         closeBriefTurn(a);
       }
-      // think-style: WeCom ~6min stream 窗口快到, 必须 finish=true 收口。
-      // 保留当前已流进气泡的 thinking 内容作为最终快照 (用户看到的内容不变),
-      // 后续正文走 standalone。如果 turn 尚未结论, 标记 done 让 concludeBriefTurn
-      // 知道气泡已收口、走 else 分支 (sendRaw / sendStandalone)。
-      if (thinkStyle) {
-        // 活跃 turn 的 thinking 才是本气泡的内容; 排队 turn 没有 thinking, 空收即可。
-        const think = (a.briefBubble === bubble) ? a.briefThinking?.trim() : undefined;
-        const content = think ? openThink(a.target, think) : withSessionTag(a.target, " ");
-        // 气泡带走了已累积的 thinking; 清空 briefThinking, 后续 pushThink 走 standalone。
-        if (a.briefBubble === bubble) a.briefThinking = undefined;
-        void finishBubble(a, bubble, content, true);
-      } else {
-        void finishBubble(a, bubble, briefDetailLink(turnId, a.target), true);
-      }
+      // WeCom ~6min stream 窗口快到, 必须 finish=true 收口。
+      void finishBubble(a, bubble, briefDetailLink(turnId, a.target), true);
     }, HARD_TIMEOUT_MS);
-    // earlyTimer: 3s 无 CLI 产出 → 先把 loading 气泡收成详情链接, 用户可即时点入。
-    // 首条 item 到达时清除 (handleBriefItem 路径)。用显式 bubble ref 而非 a.briefBubble,
-    // 因为排队中的 turn 还没成为活跃 turn, a.briefBubble 指向的是前一个。
-    // think-style: 不设 earlyTimer —— 不发链接, 气泡留着等 thinking / 答复流进来。
+    // earlyTimer: 3s 无 CLI 产出 → 将详情链接流进气泡 (不关闭), 等正文到来。
+    // 首条 item 到达时清除 (handleBriefItem / streamDetailIntoBubble 路径)。
     // codebuddy: jsonl 按完整消息落盘 (status:"completed"), 不像 Claude Code 增量写,
     // 首条 item 常在 3s 之后才到达 → earlyTimer 提前收口气泡 → 结论被迫走 standalone。
     // 跳过 earlyTimer, 让气泡等到真正的内容写入 (hardTimer 兜底 6min 窗口)。
-    const skipEarly = thinkStyle || backendForPath(a.jsonlPath).name === "codebuddy";
+    const skipEarly = backendForPath(a.jsonlPath).name === "codebuddy";
     if (!skipEarly) bubble.earlyTimer = setTimeout(() => {
       if (bubble.done) return;
-      void finishBubble(a, bubble, briefDetailLink(turnId, a.target), true);
+      // 3s 内无 item —— 流 detailLink 占位, 气泡保持打开等正文。
+      a.briefDetailStreamed = true;
+      const link = briefDetailLink(turnId, a.target);
+      void client.replyStream(bubble.frame, bubble.streamId, link, false)
+        .catch((e: Error) => log.warn({ sessionId: a.sessionId, err: e.message }, "brief: early detail stream failed"));
     }, EARLY_LINK_MS);
     if (a.briefTurnId) {
       (a.briefQueue ??= []).push(q);
@@ -2620,15 +2470,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       openBriefTurn(a, q);
     }
     try {
-      // think-style: 延迟首条 replyStream 到首个内容到达 (streamPending=true),
-      // 避免空 `<think>` 与紧随的 pushThink 产生两次快速 replyStream 触发 WeCom
-      // 服务端合并/丢弃 (off-by-one)。flushStreamPending 在 pushThink/doStreamThink 首次
-      // 调用时开流, 保证只有一次 replyStream 携带真实内容。
-      if (thinkStyle) {
-        bubble.streamPending = true;
-      } else {
-        await client.replyStream(frame, streamId, withSessionTag(a.target, "…"), false); // 挂住 loading 气泡, 不关闭
-      }
+      await client.replyStream(frame, streamId, withSessionTag(a.target, "…"), false);
     } catch (e) {
       log.warn({ sessionId: a.sessionId, turnId, err: (e as Error).message }, "brief: turn ack failed");
     }
@@ -2648,55 +2490,46 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.briefBubble = undefined;
     a.briefIsSlash = false;
     a.briefHadTool = false;
+    a.briefDetailStreamed = false;
     a.briefConcluded = false;
     a.briefLastText = undefined;
-    a.briefThinking = undefined;
-    // think-style: 不推详情链接 (CLI 侧发起的无气泡 turn 无处可流, 保持静默; 最终答复走 standalone)。
-    if (!thinkStyle) sendRaw(a, briefDetailLink(turnId, a.target));
+    sendRaw(a, briefDetailLink(turnId, a.target));
     log.info({ sessionId: a.sessionId, turnId }, "brief: turn started (CLI-side, no bubble)");
   };
 
-  // 本轮一旦出现工具调用 / tool_result / 非 final 文本, 就说明这不是"一句话答完"的
-  // 简单 turn —— 立刻把 loading 气泡收成详情链接, 用户马上能点进去看实时刷新的时间线,
-  // 不必等 turn 收口 (旧逻辑 URL 只在 closeBriefTurn 才写, 刷新太慢)。收链接即视作
-  // briefHadTool, 最终结论照常另发 standalone; closeBriefTurn 见气泡已 done 会跳过。
+  // 本轮一旦出现工具调用 / tool_result / 非 final 文本 —— 将详情链接流进气泡 (不关闭),
+  // 保持气泡打开等正文到来后以 `link\n\nbody` 收口。
+  // 若正文一直不来, hardTimer / closeBriefTurn 兜底以纯 link 收口。
+  const streamDetailIntoBubble = async (a: AttachState): Promise<void> => {
+    const b = a.briefBubble;
+    if (!b || b.done || !a.briefTurnId || a.briefDetailStreamed) return;
+    a.briefDetailStreamed = true;
+    if (b.earlyTimer) { clearTimeout(b.earlyTimer); b.earlyTimer = undefined; }
+    const link = briefDetailLink(a.briefTurnId, a.target);
+    try {
+      await client.replyStream(b.frame, b.streamId, link, false);
+    } catch (e) {
+      log.warn({ sessionId: a.sessionId, err: (e as Error).message }, "brief: detail stream failed");
+    }
+  };
+
   const earlyLinkBubble = (a: AttachState): void => {
     if (!a.briefTurnId || !a.briefBubble || a.briefBubble.done) return;
-    // think-style: 不收气泡、不发链接 —— 气泡留着继续流 thinking / 最终答复。
-    if (thinkStyle) { a.briefHadTool = true; return; }
     a.briefHadTool = true;
-    void finishBriefBubble(a, briefDetailLink(a.briefTurnId, a.target), true);
+    void streamDetailIntoBubble(a);
   };
 
   // 本轮结论落地, 只生效一次:
-  //   • 无工具 → 结论 + 详情链接一并写进 loading 气泡 (仍是一条消息);
-  //   • 有工具 / 无气泡 turn → 气泡留给 closeBriefTurn 收详情链接, 结论另发 standalone。
-  // 每个 turn 都必须留一个可回溯入口, 单句回答也要带链接。
+  //   • 无工具 → 结论 + 详情链接一并写进 loading 气泡;
+  //   • 有工具且气泡仍开 (detail 已流进去) → 以 link\n\nbody 收口;
+  //   • 有工具但气泡已收 / 无气泡 turn → body 走 standalone。
   const concludeBriefTurn = (a: AttachState, body: string): void => {
     const turnId = a.briefTurnId;
     if (!turnId || a.briefConcluded || !body.trim()) return;
     a.briefConcluded = true;
-    if (thinkStyle) {
-      // think-style: thinking 段以 `<think>🧙 …</think>` 收口 (tag 在 <think> 内),
-      // 再接正文; 无 thinking 时退回普通 tag 头正文。
-      // 软后端 (softTurnEnd) 的最终正文 final===undefined, 上游按"非 final 中途文本"
-      // 也 pushThink 进过 briefThinking —— 收口再拿它当正文 = think 与正文各一份重复。
-      // 收口前把 briefThinking 尾部等于 body 的那段剥掉, 保证正文只出现在 <think> 之后。
-      const think = stripTrailingBody(a.briefThinking?.trim(), body.trim());
-      if (a.briefBubble && !a.briefBubble.done) {
-        // 气泡还活: 整段 `<think>🧙 …</think>\n\n正文` 收进这一条 (raw, tag 已在 <think> 内)。
-        const out = think ? `${openThink(a.target, think)}</think>\n\n${body}` : withSessionTag(a.target, body);
-        void finishBriefBubble(a, out, true);
-      } else {
-        // 无气泡 turn / 气泡已收口: briefThinking 此时只含气泡期间累积的残余
-        // (气泡收口后 pushThink 直接走 standalone, 不再累积)。有残余则拼成
-        // think+body 一条; 无残余则只发 body。
-        if (think) {
-          sendRaw(a, `${openThink(a.target, think)}</think>\n\n${body}`);
-        } else {
-          sendStandalone(a, body);
-        }
-      }
+    if (a.briefDetailStreamed && a.briefBubble && !a.briefBubble.done) {
+      const link = briefDetailLink(turnId, a.target);
+      void finishBriefBubble(a, `${link} ${body}`, true);
     } else if (a.briefHadTool || !a.briefBubble) {
       sendStandalone(a, body);
     } else {
@@ -2712,24 +2545,13 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const closeBriefTurn = (a: AttachState, soft = false): void => {
     if (!a.briefTurnId) return;
     if (soft) concludeBriefTurn(a, a.briefLastText ?? "");
-    // 气泡还开着 (有工具的 turn: 结论只发了 standalone, 气泡留到这里收链接; 或空 turn
-    // 没有结论) —— 收口: 统一写详情链接, 保证每个 turn 都有可点入口。
+    // 气泡还开着 —— 收口。
+    // briefDetailStreamed: detail 已流进气泡, 以相同内容 finish;
+    // 否则 (简单 turn / 气泡未被 detail stream 接管): 写详情链接收口。
     if (a.briefBubble && !a.briefBubble.done) {
-      if (thinkStyle) {
-        // 已结论 → 气泡已在 concludeBriefTurn 的 else 分支通过 sendRaw 发出
-        //   think+body 整条消息，这里只需收掉气泡（避免重复下发）。
-        // 未结论 → doStreamThink 可能已把半成品 thinking 流进气泡 (无 </think> 闭合),
-        //   用闭合的 thinking 快照收口, 避免 WeCom 渲染标签未闭合的乱排版。
-        //   如果连 thinking 都没有 (streamPending 还在), 空收。
-        if (a.briefConcluded) {
-          void finishBriefBubble(a, withSessionTag(a.target, " "), true);
-        } else {
-          const think = a.briefThinking?.trim();
-          const content = think
-            ? `${openThink(a.target, think)}</think>`
-            : withSessionTag(a.target, " ");
-          void finishBriefBubble(a, content, true);
-        }
+      if (a.briefDetailStreamed) {
+        const link = briefDetailLink(a.briefTurnId, a.target);
+        void finishBriefBubble(a, link, true);
       } else {
         void finishBriefBubble(a, briefDetailLink(a.briefTurnId, a.target), true);
       }
@@ -2739,12 +2561,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.briefTurnId = undefined;
     a.briefBubble = undefined;
     a.briefHadTool = false;
+    a.briefDetailStreamed = false;
     a.briefIsSlash = false;
     a.briefConcluded = false;
     a.briefLastText = undefined;
-    a.briefThinking = undefined;
-    if (a.thinkFlushTimer) { clearTimeout(a.thinkFlushTimer); a.thinkFlushTimer = undefined; }
-    a.thinkFlushing = false;
     // 放行下一个排队的 turn —— 它的气泡早在 ack 时就挂出去了, 这里只是激活。
     const next = a.briefQueue?.shift();
     if (next) openBriefTurn(a, next);
@@ -2763,8 +2583,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // 一个僵尸 turn 上来当活跃 turn, 白收一遍。
     for (const q of a.briefQueue ?? []) {
       closed++;
-      // think-style: 不发链接, 排队气泡收为"已取消"提示 (避免空白气泡闪过)。
-      void finishBubble(a, q.bubble, thinkStyle ? withSessionTag(a.target, "⏳ (queued, cancelled)") : briefDetailLink(q.turnId, a.target), thinkStyle);
+      void finishBubble(a, q.bubble, briefDetailLink(q.turnId, a.target));
       recordTurnClose(q.turnId);
     }
     a.briefQueue = [];
@@ -2852,57 +2671,16 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           ts: now,
         });
       }
-      // think-style: 工具调用也算中间过程, 以 `🔧 [Name compact](url)` 摘要进 think,
-      // 复用 tool call detail url, 让 think 内容里的工具调用也可点开独立详情。
-      if (thinkStyle) {
-        const lines = item.calls
-          .map((c) => {
-            const compact = safeForMarkdown(renderToolInputCompact(c.input, cfg.wrc.mirror.toolUseInlineMaxChars));
-            const url = detailUrlFor(c.toolUseId, a.target);
-            return url ? `🔧 [${c.name} ${compact}](${url})` : `🔧 ${c.name} ${compact}`;
-          })
-          .join("\n");
-        pushThink(a, lines);
-      }
       return;
     }
     if (item.kind === "tool_result") {
       earlyLinkBubble(a);
       recordTurnItem(turnId, { t: "tool_result", toolUseId: item.toolUseId, body: item.full, ts: now });
-      // think-style: 工具结果 (中间输出) 也进 think, 单行截断免刷屏。
-      if (thinkStyle) pushThink(a, `↳ ${oneLineSummary(item.full, cfg.wrc.mirror.toolUseInlineMaxChars)}`);
-      return;
-    }
-    if (item.kind === "thinking") {
-      recordTurnItem(turnId, { t: "text", body: item.body, ts: now });
-      // thinking items only emitted by parser when thinkStyle=true (line 736 gate).
-      pushThink(a, item.body); // reasoning 进 think 流
       return;
     }
     if (item.kind === "text") {
       recordTurnItem(turnId, { t: "text", body: item.body, ts: now, final: item.final === true });
-      // think-style: 确知的中途输出 (final===false) 只进 think 流, 不算结论;
-      // 软后端的不确定态 (final===undefined) 两可 — 见下方分支里的分流说明。
-      if (thinkStyle && item.final === false) {
-        pushThink(a, item.body);
-        return;
-      }
-      if (thinkStyle && item.final === undefined) {
-        // 软后端说不清这句是不是终句, 两可:
-        // 气泡还活 → 进 think 累积 (收口时 stripTrailingBody 会剥掉重复), 同时记
-        //   briefLastText 当正文候选; 终句身份留给 closeBriefTurn(soft) 定夺。
-        // 气泡已死 → 没有收口阶段可纠偏, 只能按正文发 —— 它很可能就是终句,
-        //   走 pushThink 会给它打 💭 前缀, 把答复整个塞进 <think>。
-        if (a.briefBubble && !a.briefBubble.done) {
-          a.briefLastText = item.body;
-          pushThink(a, item.body);
-        } else {
-          enqueueStandalone(a, item.body);
-        }
-        return;
-      }
-      a.briefLastText = item.body; // 软收口时拿它当结论 (那条路径上没有 final 标记)
-      // final===false 才是"确知的中途输出"; undefined 是后端说不清, 不能据此提前收气泡。
+      a.briefLastText = item.body;
       if (item.final === false) earlyLinkBubble(a);
       if (item.final === true) concludeBriefTurn(a, item.body);
       return;
@@ -3310,7 +3088,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       log: log.child({ sub: "tail", sessionId }),
       includeUser: cfg.wrc.mirror.includeUser,
       includeTools: cfg.wrc.mirror.includeTools,
-      thinkStyle,
       includeToolResults: cfg.wrc.mirror.includeToolResults,
       toolResultMaxChars: cfg.wrc.mirror.toolResultMaxChars,
       toolUseInlineMaxChars: cfg.wrc.mirror.toolUseInlineMaxChars,
@@ -3517,7 +3294,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   }
 
   // Render full tool details for a finalized turn into one-or-more markdown
-  // chunks (split at chunkChars boundaries).
+  // chunks (split at chunkBytes boundaries).
   const renderToolDetails = (tools: ToolEntry[]): string[] => {
     const parts: string[] = [];
     let i = 0;
@@ -3534,7 +3311,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       );
     }
     const merged = parts.join("\n\n---\n\n");
-    return splitChunks(merged, Math.max(200, cfg.wrc.mirror.chunkChars - TAG_HEADER_BUDGET));
+    return splitChunks(merged, Math.max(200, cfg.wrc.mirror.chunkBytes - TAG_HEADER_BUDGET));
   };
 
   const resolveToolDetail = (turnId: string): { target: string; markdown: string[] } | undefined => {
@@ -3678,7 +3455,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       log: log.child({ sub: "tail", sessionId: newSessionId }),
       includeUser: cfg.wrc.mirror.includeUser,
       includeTools: cfg.wrc.mirror.includeTools,
-      thinkStyle,
       includeToolResults: cfg.wrc.mirror.includeToolResults,
       toolResultMaxChars: cfg.wrc.mirror.toolResultMaxChars,
       toolUseInlineMaxChars: cfg.wrc.mirror.toolUseInlineMaxChars,

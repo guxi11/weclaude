@@ -20,12 +20,26 @@ const FENCE_RE = /^\s*(`{3,}|~{3,})/;
 /** A table separator row: only pipes, dashes, colons, spaces — and ≥1 dash. */
 const TABLE_SEP_RE = /^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/;
 
+// Budgets are BYTES, not chars: WeCom caps a markdown payload at 4096 UTF-8
+// bytes and CJK is 3 bytes/char, so a char budget either wastes most of the
+// page on English or blows the cap on Chinese.
+const bytes = (s: string): number => Buffer.byteLength(s, "utf8");
+
 /** Rendered length of a line run joined by "\n". */
 const sizeOf = (lines: string[]): number =>
-  lines.length === 0 ? 0 : lines.reduce((n, l) => n + l.length + 1, -1);
+  lines.length === 0 ? 0 : lines.reduce((n, l) => n + bytes(l) + 1, -1);
 
-const sliceLine = (line: string, max: number): string[] =>
-  Array.from({ length: Math.ceil(line.length / max) }, (_, i) => line.slice(i * max, (i + 1) * max));
+// Walk code points — a byte-offset slice can split a surrogate pair (emoji)
+// and hand WeCom invalid UTF-8.
+const sliceLine = (line: string, max: number): string[] => {
+  const out: string[] = [];
+  for (const ch of line) {
+    const last = out.at(-1);
+    if (last !== undefined && bytes(last) + bytes(ch) <= max) out[out.length - 1] = last + ch;
+    else out.push(ch);
+  }
+  return out;
+};
 
 const isTableRow = (l: string | undefined): boolean => !!l && l.includes("|");
 
@@ -66,8 +80,8 @@ const explode = (b: Block, max: number): string[] => {
   const pieces: string[][] = [];
   let cur: string[] = [];
   for (const line of b.body) {
-    for (const p of line.length > budget ? sliceLine(line, budget) : [line]) {
-      if (cur.length && sizeOf(cur) + 1 + p.length > budget) { pieces.push(cur); cur = []; }
+    for (const p of bytes(line) > budget ? sliceLine(line, budget) : [line]) {
+      if (cur.length && sizeOf(cur) + 1 + bytes(p) > budget) { pieces.push(cur); cur = []; }
       cur.push(p);
     }
   }
@@ -80,7 +94,7 @@ const blockLines = (b: Block): string[] => [...b.head, ...b.body, ...b.tail];
 /** Greedy block-wise packing into ≤max chunks; atomic blocks stay whole unless
  *  they alone exceed max, in which case they split into renderable pieces. */
 export const splitMarkdown = (s: string, max: number): string[] => {
-  if (s.length <= max) return [s];
+  if (bytes(s) <= max) return [s];
   const chunks: string[] = [];
   let cur: string[] = [];
   const flush = (): void => {

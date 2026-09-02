@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+### Changed
+- `mirror` 分页预算改按**字节**计,单页上限抬到 3800B(`wrc.mirror.chunkChars` → `chunkBytes`,默认 `1800` → `3800`)。企微 markdown 的 `content` 上限是 4096 **字节**而非字符,旧的字符预算对英文浪费了大半页,对中文又必然超限;`shared/md-chunk` 的 `sizeOf` / `sliceLine` 同步改成 `Buffer.byteLength` 计量,长行按 code point 切(不再切断 emoji 代理对)。头部分片预留 32 → 64B(链接态 `[🧙 #tag](url)` 可达 110B)。
+
 ## [1.2.31] - 2026-09-01
 
 ### Fixed
