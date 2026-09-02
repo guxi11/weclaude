@@ -1712,6 +1712,11 @@ export interface MirrorBridge {
   isBusy: (target: string) => Promise<boolean>;
   /** Latest assistant message of `target` — the handoff payload between agents. */
   lastText: (target: string) => string;
+  /** Is the inbound `quoted` text a snapshot of `target`'s still-open outbound
+   *  bubble (unfinished last stream)? Such a quote carries only transient
+   *  chrome — the detail-link URL plus the latest real-time CoT/tool line —
+   *  so the caller must keep just the routing tag and drop the body. */
+  isOpenBubbleQuote: (target: string, quoted: string) => boolean;
 }
 
 interface ToolEntry {
@@ -1848,6 +1853,9 @@ interface AttachState {
   cotText?: string;
   /** CoT 进度的节流计时器 —— 每次刷新都是整条内容重发, 高频 thinking 不能 1:1 打上去。 */
   cotTimer?: NodeJS.Timeout;
+  /** 最近一条已发上气泡的 CoT 进度行。cotText 是"待发"; 引用比对要看"已发" ——
+   *  用户引用的是屏幕上定格的那行, 而非节流窗口里积压的下一条。 */
+  cotLastSent?: string;
   /** 软收口的静默期计时器 —— 任何新 item 到达即撤销。 */
   softEnd?: NodeJS.Timeout;
   /** CLI 侧最近一条用户输入, 用作下一个"无气泡 turn"(ensureBriefTurn) 的 userQuery。
@@ -2441,6 +2449,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const turnId = a.briefTurnId;
     // 收口后这一路全部失效: 气泡要么已 done, 要么 turn 已经换人/清空。
     if (!text || !b || b.done || !turnId || a.briefConcluded) return;
+    a.cotLastSent = text;
     try {
       await client.replyStream(b.frame, b.streamId, `${briefDetailLink(turnId, a.target)} \`${text}\``, false);
     } catch (e) {
@@ -4152,6 +4161,32 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     return p ? lastAssistantText(p) : "";
   };
 
+  // ── 未收口气泡的引用判定 ────────────────────────────────────────────
+  // tag 会话的 last stream 未收口时, 群里最新那条气泡是瞬态的: 详情链接 URL +
+  // 最新一条实时 CoT/工具行 (brief) 或累积中的 acc (非 brief)。引用它要的是路由,
+  // 不是把这些中间态贴回 prompt —— 判定命中 ⇒ 调用方只保留 tag, 正文丢弃。
+  // URL 必须先于 canon 剥掉: canonForCompare 只剩字母数字, host/path 的字符会
+  // 永远卡住比对。两侧同剥, 才在同一层级上比。
+  const OPEN_QUOTE_URL_RE = /https?:\/\/\S+/g;
+  const quoteCanon = (s: string): string => s.replace(OPEN_QUOTE_URL_RE, " ").replace(/[^\p{L}\p{N}]/gu, "");
+  const openBubbleBodies = (a: AttachState): string[] => {
+    if (a.briefBubble && !a.briefBubble.done && !a.briefConcluded) {
+      return [a.cotLastSent, a.cotText].filter((s): s is string => !!s);
+    }
+    const s = a.liveStream;
+    return s && !s.closed && !s.dead ? [s.acc, s.lastSent] : [];
+  };
+  const isOpenBubbleQuote = (target: string, quoted: string): boolean => {
+    const a = byTarget.get(target);
+    if (!a) return false;
+    const bodies = openBubbleBodies(a);
+    if (bodies.length === 0) return false;
+    const qc = quoteCanon(quoted);
+    // 剥掉 URL 后什么都不剩 ⇒ 引用的只是链接头 + "…" 这类纯 chrome, 直接命中。
+    if (!qc) return true;
+    return bodies.some((b) => quoteCanon(b).includes(qc));
+  };
+
   // 一个 target 的完整画像。本 chat 的兄弟和外 chat 的 peer 走同一条,只有
   // `self` / `address` 因观察者而异 —— 地址本来就是相对调用方说的话。
   const peerInfoOf = async (t: string, self: string): Promise<PeerInfo> => {
@@ -4396,6 +4431,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     peekTurns,
     isBusy,
     lastText,
+    isOpenBubbleQuote,
     status: () => {
       const list = Array.from(bySessionId.values()).map((a) => ({
         sessionId: a.sessionId,

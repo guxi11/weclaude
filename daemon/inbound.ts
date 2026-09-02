@@ -898,6 +898,12 @@ export const installInboundRouter = (
       log.info({ target, reason: "lastResponse" }, "quoteInContext: hit");
       return true;
     }
+    // 源会话的 last stream 还没收口 ⇒ 引用的是实时中间态 (URL + 最新 CoT/工具行),
+    // 只保留路由 tag, 不把瞬态内容贴回 prompt。
+    if ("isOpenBubbleQuote" in bridge && (bridge as MirrorBridge).isOpenBubbleQuote(target, quoted)) {
+      log.info({ target, reason: "openBubble" }, "quoteInContext: hit");
+      return true;
+    }
     const mirrors = (bridge as { status?: () => { mirrors?: Array<{ target: string; jsonlPath: string }> } })
       .status?.().mirrors ?? [];
     const jsonl = mirrors.find((m) => m.target === target)?.jsonlPath;

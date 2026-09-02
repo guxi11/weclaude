@@ -2,7 +2,10 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [1.3.5] - 2026-09-02
+
+### Fixed
+- `mirror`: **引用未收口的 last stream 不再把瞬态内容贴回 prompt**。tag 会话的出站流还在进行中时,群里最新气泡是实时中间态 —— 详情链接 URL + 最新一条 CoT/工具行 (brief) 或累积中的 acc (非 brief);此前引用它走 `quoteInContext` 两级判定 (lastResponse 只记 `finish=true`,transcript tail 里又没有 thinking/CoT 行) 双双 miss,URL 与实时工具/文本被整段注入正文。现在 mirror bridge 暴露 `isOpenBubbleQuote(target, quoted)`: 取该 target 未收口气泡的当前可见正文 (brief 为 `cotLastSent`/`cotText`,非 brief 为 `liveStream` 的 `acc`/`lastSent`),两侧先剥 URL 再做字母数字 canon 比对;引用剥完只剩 URL/省略号直接判命中。命中 ⇒ 只保留路由 tag,正文丢弃;引用旧气泡不受影响 (内容对不上未收口流,照旧走 tail 判定)。
 
 ### Changed
 - MCP: **`enter` → `set_workspace`，换项目一步到位**。旧 `enter` 只写 pendingCwd、还要人去企微侧补发 `/new` 才生效；`set_workspace` 在 daemon 内部直接走完 `/new` 路径（`setPendingCwd` → 杀 pane → 新 cwd 重开 → attach → 📂 项目回执），等价于「cd 之后用户发了 /new」。调用方就是被换掉的会话时会被当场终止（工具结果不返回，回执气泡即凭证）；spawn 失败时切换仍留在 pendingCwd，手动 `/new` 可兜底。daemon 路由 `POST /mirror/cwd` → `POST /mirror/workspace`，`/pwd` 提示、tips、README、技术说明同步更新。
@@ -314,7 +317,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.3...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.5...HEAD
+[1.3.5]: https://github.com/guxi11/wezard/compare/v1.3.4...v1.3.5
 [1.3.3]: https://github.com/guxi11/wezard/compare/v1.3.2...v1.3.3
 [1.3.2]: https://github.com/guxi11/wezard/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/guxi11/wezard/compare/v1.3.0...v1.3.1
