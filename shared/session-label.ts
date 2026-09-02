@@ -135,20 +135,14 @@ const HEADER_RE = new RegExp(
 
 /** 反解一条出站气泡的 `emoji #tag` 头,返回 tag 与剥头后的正文。
  *  `fromBot=false` 表示这不是 wezard 发的,body 原样返回。
- *  think-style 气泡把 tag 头塞进了 `<think>` 内 (`<think>🦊 #fix …thinking…</think>\n\n正文`);
- *  微信引用时 think 段与正文会被整体带上,`<think>` 标记有时保留有时被渲染剥掉。这里:
- *    1. 先剥掉可能存在的 `<think>` 起始标记 (无标记也不影响, 头就在最前);
- *    2. 认出 tag 头拿 tag —— 这是路由继承唯一需要的信息;
- *    3. body 保留 think+正文全文 (仅去掉 `<think>`/`</think>` 标记杂质), 因为 last-response
- *       里存的也是同一整串, `canonContains` 子串比对必然命中 —— 不去切正文, 避免标记被剥时切错。 */
+ *  只切掉头那一段,body 原样保留 —— last-response 里存的是剥头后的同一整串,
+ *  `canonContains` 子串比对才能命中。 */
 export const parseTagHeader = (text: string): { fromBot: boolean; tag: string; body: string } => {
   const t = text.trim();
-  const afterThink = t.replace(/^<think>\s*/, "");
-  const m = HEADER_RE.exec(afterThink);
+  const m = HEADER_RE.exec(t);
   if (!m) return { fromBot: false, tag: "", body: t };
   const tag = m[1] ?? m[2] ?? "";
-  const body = afterThink.slice(m[0].length).replace(/<\/?think>/g, "").trim();
-  return { fromBot: true, tag, body };
+  return { fromBot: true, tag, body: t.slice(m[0].length).trim() };
 };
 
 /** Trailing-space emoji badge for card titles; "" for untagged targets. */

@@ -89,8 +89,6 @@ IM 里发 `/new` 直接开新 tmux 窗口 + 新 Claude 会话；`/clear` 清当�
 
 > 💡 **mirror 不要求你必须先在 CLI 里开 tmux**：在企业微信里直接发 `/new` 就能从零起一个新 tmux 窗口 + Claude 会话；甚至首次发任意消息都会自动 spawn + 绑定（首条消息既是绑定信号也是第一句 prompt）。回家打开终端 `tmux attach -t wezard` 接管即可。
 
-> 🧙 **think-style（`wrc.mirror.thinkStyle`，默认关）**：开启后每轮的思考过程——reasoning、中途叙述、每次工具调用/结果的摘要——实时流进气泡里那段 `<think>🧙 …` 折叠区，只有最终答复落成 `</think>` 之后的正文。你一发消息就看得到它在想什么，而不是干等一个 `…` 占位再一次性出全文。
-
 ---
 
 ## 体验是什么样

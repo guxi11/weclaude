@@ -1827,9 +1827,6 @@ interface AttachState {
   briefLastText?: string;
   /** 软收口的静默期计时器 —— 任何新 item 到达即撤销。 */
   softEnd?: NodeJS.Timeout;
-  // thinkRescueTimer removed: softEnd (10s silence) + hardTimer (350s) already
-  // cover the "turn never concludes" case without a fixed wall-clock cutoff that
-  // fires prematurely on long-running codebuddy turns (see #stream incident).
   /** CLI 侧最近一条用户输入, 用作下一个"无气泡 turn"(ensureBriefTurn) 的 userQuery。
    *  WeCom 发起的 turn 直接从 dispatch 拿到原文, 用不到它。 */
   pendingBriefQuery?: string;
@@ -2148,10 +2145,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     }
   };
 
-  // thinkStyle 格式化已移除 — standalone 内容直接发送。
   // Debounce 聚合: 仅 standalone 路径用。窗口内 onItem 多次落入 → 合并成单条 markdown。
-  // 0 关闭时退化为透传。flushStandalone 也用于 detach 时的 drain。
-  const flushStandalone = (a: AttachState, _force = false): void => {
+  // 0 关闭时退化为透传。flushStandalone 也用于 detach / teardown 时的 drain。
+  const flushStandalone = (a: AttachState): void => {
     const buf = a.standaloneBuf;
     if (!buf) return;
     const merged = buf.parts.join("\n\n");
@@ -2209,7 +2205,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const flushPendingStandalone = (a: AttachState): void => {
     if (!a.standaloneBuf) return;
     clearTimeout(a.standaloneBuf.timer);
-    flushStandalone(a, true);
+    flushStandalone(a);
   };
 
   // Path A: a needs-approval tool_use just landed. Aggregate the buffer as one
@@ -2449,18 +2445,18 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // WeCom ~6min stream 窗口快到, 必须 finish=true 收口。
       void finishBubble(a, bubble, briefDetailLink(turnId, a.target), true);
     }, HARD_TIMEOUT_MS);
-    // earlyTimer: 3s 无 CLI 产出 → 将详情链接流进气泡 (不关闭), 等正文到来。
-    // 首条 item 到达时清除 (handleBriefItem / streamDetailIntoBubble 路径)。
-    // codebuddy: jsonl 按完整消息落盘 (status:"completed"), 不像 Claude Code 增量写,
-    // 首条 item 常在 3s 之后才到达 → earlyTimer 提前收口气泡 → 结论被迫走 standalone。
-    // 跳过 earlyTimer, 让气泡等到真正的内容写入 (hardTimer 兜底 6min 窗口)。
-    const skipEarly = backendForPath(a.jsonlPath).name === "codebuddy";
-    if (!skipEarly) bubble.earlyTimer = setTimeout(() => {
+    // earlyTimer: 起轮 3s 后无条件把详情链接流进气泡 (finish=false, 气泡保持打开),
+    // 正文到位时再以 `link body` 收口。它是"气泡最迟 3s 必带详情链接"的保底, 而不是
+    // 等 CLI 产出的超时器 —— 因此与后端无关: codebuddy 按完整消息落盘, 首条 item 常在
+    // 几十秒后才到, 没有它气泡会一直停在 "…" 这个纯文本占位上。
+    // 排队中的轮照样挂 —— 它的气泡一样已经挂在群里等着, 没有理由让它一直空着。
+    bubble.earlyTimer = setTimeout(() => {
       if (bubble.done) return;
-      // 3s 内无 item —— 流 detailLink 占位, 气泡保持打开等正文。
-      a.briefDetailStreamed = true;
-      const link = briefDetailLink(turnId, a.target);
-      void client.replyStream(bubble.frame, bubble.streamId, link, false)
+      // 只在本轮是当前活跃轮时认领 briefDetailStreamed —— 排队轮不能把标记写到
+      // 正在跑的那一轮的状态上。
+      if (a.briefBubble === bubble) a.briefDetailStreamed = true;
+      // 挂 `…` 表示"正文还没到" —— 整条内容会在正文到位时被替换掉。
+      void client.replyStream(bubble.frame, bubble.streamId, `${briefDetailLink(turnId, a.target)} …`, false)
         .catch((e: Error) => log.warn({ sessionId: a.sessionId, err: e.message }, "brief: early detail stream failed"));
     }, EARLY_LINK_MS);
     if (a.briefTurnId) {
@@ -2505,7 +2501,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (!b || b.done || !a.briefTurnId || a.briefDetailStreamed) return;
     a.briefDetailStreamed = true;
     if (b.earlyTimer) { clearTimeout(b.earlyTimer); b.earlyTimer = undefined; }
-    const link = briefDetailLink(a.briefTurnId, a.target);
+    const link = `${briefDetailLink(a.briefTurnId, a.target)} …`;
     try {
       await client.replyStream(b.frame, b.streamId, link, false);
     } catch (e) {
@@ -2596,7 +2592,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       if (a.outbound.kind === "deferred") clearTimeout(a.outbound.timer);
       a.outbound = undefined;
     }
-    if (a.standaloneBuf) { clearTimeout(a.standaloneBuf.timer); flushStandalone(a, true); }
+    if (a.standaloneBuf) { clearTimeout(a.standaloneBuf.timer); flushStandalone(a); }
     if (a.liveStream && !a.liveStream.closed) {
       closed++;
       void finalizeStream(a, a.liveStream);
@@ -2646,12 +2642,17 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const handleBriefItem = (a: AttachState, item: RenderItem): void => {
     const turnId = a.briefTurnId;
     if (!turnId) return;
-    // 首条 item 到达 → 清除 earlyTimer (CLI 已有响应, 不需要超时收链接了)。
-    if (a.briefBubble?.earlyTimer) { clearTimeout(a.briefBubble.earlyTimer); a.briefBubble.earlyTimer = undefined; }
+    // assistant 侧产出到达 → 清除 earlyTimer (链接已由 earlyLinkBubble 推过 / 正文就要
+    // 收口)。只认 opener: user_text 是注入回显与 CLI 侧敲字, 拿它清表会让气泡在模型
+    // 整个思考期停在占位上, 详情链接不再出现。
+    if (BRIEF_TURN_OPENERS.has(item.kind) && a.briefBubble?.earlyTimer) {
+      clearTimeout(a.briefBubble.earlyTimer);
+      a.briefBubble.earlyTimer = undefined;
+    }
     const now = Date.now();
     if (item.kind === "tool_use") {
       a.briefHadTool = true; // 有工具 → 气泡收口写详情链接, 结论另发 standalone
-      earlyLinkBubble(a);    // 立刻推详情链接, 不等 turn 收口 (think-style 下保持气泡开放)
+      earlyLinkBubble(a);    // 立刻推详情链接, 气泡保持开放等正文
       for (const c of item.calls) {
         // 也走单卡 detail record — turn 页里 tool_use 段可点开链到独立详情 (以后有需要时)。
         if (c.toolUseId) {
@@ -3025,7 +3026,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (a.softEnd) { clearTimeout(a.softEnd); a.softEnd = undefined; }
     while (a.briefTurnId) closeBriefTurn(a); // 活跃 + 排队中的 turn 全部收掉
     if (a.liveStream && !a.liveStream.closed) void finalizeStream(a, a.liveStream);
-    if (a.standaloneBuf) { clearTimeout(a.standaloneBuf.timer); flushStandalone(a, true); }
+    if (a.standaloneBuf) { clearTimeout(a.standaloneBuf.timer); flushStandalone(a); }
     a.tail.stop();
     bySessionId.delete(a.sessionId);
     if (byTarget.get(a.target) === a) byTarget.delete(a.target);
@@ -4419,7 +4420,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // 3) standalone 防抖里 (3s 默认) 还压着的合并文案 — 强制立刻发。
       if (a.standaloneBuf) {
         clearTimeout(a.standaloneBuf.timer);
-        flushStandalone(a, true);
+        flushStandalone(a);
       }
       // 4) liveStream 半成品: 当前 acc 里有内容但还没 flush 出去 — 同步刷一刀,
       //    保留 stream 不 finalize (后续 tool_result 还要继续 append 同一气泡)。
@@ -4736,7 +4737,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // Drain any pending standalone debounce so a prior turn's tail tail
       // doesn't get sandwiched into this turn's pre-card flush (Path A) or
       // race against the new stream's first content (Path B).
-      if (a.standaloneBuf) { clearTimeout(a.standaloneBuf.timer); flushStandalone(a, true); }
+      if (a.standaloneBuf) { clearTimeout(a.standaloneBuf.timer); flushStandalone(a); }
       // /clear produces no assistant output; opening a stream would leave a
       // stale "…" + quoted-user bubble in WeCom. Skip the stream entirely on
       // success path; only surface a terse "clean" if inject fails.

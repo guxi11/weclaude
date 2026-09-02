@@ -51,7 +51,7 @@
       "sessionId": "",
       // Where to push live assistant output. Empty → defaultChat.
       "pushChat": "",            // "user:<userid>" | "chat:<chatid>"
-      "chunkChars": 1800,
+      "chunkBytes": 3800,
       // Brief 模式: 每个 turn 群里只发两条 —— 「🧵 [本轮详情](url)」+ finish 文本。
       // 中间 tool_use / tool_result / thinking 只写进详情页 (可折叠, Claude 网页风格)。
       // 授权卡照常发群。

@@ -139,7 +139,7 @@ const makeClaude = (name: CliBackendName, bin: string): CliBackend => {
 //   function_call_result → { type:"function_call_result", callId, name, status,
 //                            output:{type:"text", text}, id, parentId }
 //   reasoning            → { type:"reasoning", rawContent:[{type:"reasoning_text", text}] }
-//                          → mapped to assistant message w/ a `thinking` block (think-style)
+//                          → mapped to assistant message w/ a `thinking` block
 //   file-history-snapshot | ai-title | summary → drop
 //
 // Key structural differences from Claude Code:
@@ -241,7 +241,7 @@ const normalizeCodebuddy = (raw: unknown): NormalizedTranscriptLine | null => {
 
   // reasoning: thinking lives in rawContent:[{type:"reasoning_text", text}] (not
   // in content, which is empty). Map into a Claude-shape assistant message with
-  // a `thinking` block so mirror-bridge's think-style path can pick it up.
+  // a `thinking` block so the transcript keeps Claude's shape.
   // No softTurnEnd — a reasoning record is never a turn boundary.
   if (type === "reasoning") {
     const rawContent = (r.rawContent ?? []) as Array<{ type?: string; text?: string }>;
