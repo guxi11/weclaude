@@ -81,6 +81,13 @@ wezard init
 
 这是**唯一**绕过白名单的入口，10 分钟窗口，消费完立刻关。后续所有消息都按白名单鉴权。
 
+**绑定之后，按这个顺序把会话跑起来**（mirror 模式）：
+
+1. **发首条消息**：在企微里随便说句话（比如 `hi`）。首条消息既是绑定信号也是第一句 prompt——daemon 自动拉起 tmux 窗口 + Claude 会话，回复逐字流式推回 IM。回家打开终端 `tmux attach -t wezard` 就能接管，对话一字不少。
+2. **切到你的项目**：新会话默认落在 `~/.wezard/workspace`，直接对 AI 说「切到 /path/to/proj」——它调 `set_workspace` MCP 一步换目录重开会话（等价 `cd` 后 `/new`），收到 📂 项目回执即切换完成，`/pwd` 可随时确认。
+3. **第一次审批**：Claude 要跑 `Bash` / `Edit` 时，IM 会弹按钮卡，点 ✅/❌/⏱（放行 N 分钟）即可；点卡片里的链接看完整 input / result / git diff。
+4. **`/h` 拉出命令表**：`/new` 开新会话、`/clear` 清上下文、`/sessions` 切换、`#tag` 并行多会话、`/usage` `/cost` 查额度……全部命令一屏可查。
+
 ---
 
 ## 镜像模式
