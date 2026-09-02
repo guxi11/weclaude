@@ -2,6 +2,13 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Changed
+- `mirror`: **对话边界收口不再凭空新发/覆盖消息**。连续发消息触发上一轮的强制结束时:(a) 有正文才写 —— brief 气泡以 `链接 正文` 收口、非 brief 的 liveStream 以累积 acc 收口、deferred 缓冲收入旧 streamId(`finish=true` 顺带关掉它的 loading 气泡),不再整体另发 standalone;(b) 没正文一个字都不写 —— 旧代码的裸链接/`" "` 空收口会把 `链接 …`/CoT 进度行整条覆盖掉,结束处理自己制造错发,现在气泡保持现有内容由企微 6min 窗口自然到期。`closeBriefTurn` 软/硬/边界三路统一为先 `concludeBriefTurn(briefLastText)` 再清态,`soft` 形参移除。
+
+- `mirror` brief: **CoT 进度行的内容源补上非终句文本**。此前只取 thinking 与工具调用,模型在工具之间打的叙述性文字("我先看看这个文件…")不进气泡;现在进度行取"最新一条 CoT 内容"——thinking / 非终句文本(软后端含最终答案本身,收口时整条被覆盖)/ 工具调用,三类 whichever-latest。
+
 ## [1.3.0] - 2026-09-02
 
 ### Added

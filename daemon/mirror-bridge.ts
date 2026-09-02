@@ -2033,14 +2033,17 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (s.flushTimer) { clearTimeout(s.flushTimer); s.flushTimer = undefined; }
     if (s.idleTimer) { clearTimeout(s.idleTimer); s.idleTimer = undefined; }
     if (s.hardTimer) { clearTimeout(s.hardTimer); s.hardTimer = undefined; }
-    if (!s.dead) {
+    // 没正文不写: finish=true 是整条覆盖, 空正文只会把 "…" ack 覆盖成光秃秃的
+    // 链接头, 结束处理自己制造错发。气泡保持现有内容, 由 WeCom 6min 窗口自然
+    // 到期。dead 流同理只做本地清理。
+    if (!s.dead && s.acc.trim()) {
       const card = detailCardFor(s, a.target);
       try {
         if (card) {
           s.cardSent = true;
-          await client.replyStreamWithCard(s.frame, s.streamId, withLinkedTag(a, s.acc || " ", undefined, s.turnId), true, { templateCard: card });
+          await client.replyStreamWithCard(s.frame, s.streamId, withLinkedTag(a, s.acc, undefined, s.turnId), true, { templateCard: card });
         } else {
-          await client.replyStream(s.frame, s.streamId, withLinkedTag(a, s.acc || " ", undefined, s.turnId), true);
+          await client.replyStream(s.frame, s.streamId, withLinkedTag(a, s.acc, undefined, s.turnId), true);
         }
         log.info({ sessionId: a.sessionId, turnId: s.turnId, accLen: s.acc.length, tools: s.tools.length, withCard: !!card }, "stream finalize");
       } catch (e) {
@@ -2048,7 +2051,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         s.dead = true;
       }
     } else {
-      log.info({ sessionId: a.sessionId, turnId: s.turnId, accLen: s.acc.length, tools: s.tools.length }, "stream finalize (dead)");
+      log.info({ sessionId: a.sessionId, turnId: s.turnId, accLen: s.acc.length, tools: s.tools.length, dead: s.dead }, "stream finalize (no body — not overwriting)");
     }
     if (s.tools.length > 0) {
       turnRegistry.set(s.turnId, {
@@ -2261,7 +2264,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     flushPendingStandalone(a);
     void (async () => {
       try {
-        await client.replyStream(out.frame, out.streamId, withLinkedTag(a, bubbleMd || " "), true);
+        // 有正文才写旧 streamId (收入 stream); 空缓冲一个字都不写 —— 否则
+        // loading 气泡被 " " 覆盖, 结束处理自己凭空制造一条空消息。
+        if (bubbleMd) await client.replyStream(out.frame, out.streamId, withLinkedTag(a, bubbleMd), true);
       } catch (e) {
         log.warn(
           { sessionId: a.sessionId, err: (e as Error).message },
@@ -2493,11 +2498,12 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // WeCom ~6min stream 窗口快到, 必须 finish=true 收口。
       void finishBubble(a, bubble, briefDetailLink(turnId, a.target), true);
     }, HARD_TIMEOUT_MS);
-    // 新消息 = 对话边界: 立刻收掉上一 turn (气泡以详情链接收口), 新 turn 直接
-    // 激活、不排队。旧 turn 在 CLI 侧的剩余产出自然流入新气泡 —— "新回复走最新
-    // 气泡"正是这个语义。代价是旧 turn 页提前标完、尾部 item 记到新 turn 名下,
-    // 但远小于排队的代价: 排队 turn 的 frame 在前一个长 turn 期间 (可达数分钟)
-    // 过期, 激活后 replyStream 全被 WeCom 拒收 (#stream 事故的静默根因)。
+    // 新消息 = 对话边界: 立刻收掉上一 turn, 新 turn 直接激活、不排队。收口语义见
+    // closeBriefTurn: 有正文收入旧气泡, 没正文不写一个字 (绝不因边界结束凭空新发/
+    // 覆盖消息)。旧 turn 在 CLI 侧的剩余产出自然流入新气泡 —— "新回复走最新气泡"
+    // 正是这个语义。代价是旧 turn 页提前标完、尾部 item 记到新 turn 名下, 但远小于
+    // 排队的代价: 排队 turn 的 frame 在前一个长 turn 期间 (可达数分钟) 过期, 激活后
+    // replyStream 全被 WeCom 拒收 (#stream 事故的静默根因)。
     if (a.briefTurnId) closeBriefTurn(a);
     openBriefTurn(a, q);
     // ack 即详情链接。URL 的三个入参 (turnId / target / host) 在收消息这一刻全部已知 ——
@@ -2556,15 +2562,14 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     recordCloseOpenTurns({ target: a.target, sessionId: a.sessionId, exceptIds: [turnId] });
   };
 
-  /** soft=true: 收口信号来自静默期确认 (后端无终句标记), 拿本轮最后一句 text 当结论。
-   *  硬信号路径上结论早已由 final text 落地, briefConcluded 会挡住重复推送。 */
-  const closeBriefTurn = (a: AttachState, soft = false): void => {
+  /** 收口一个 turn (软/硬/对话边界统一语义):
+   *  有正文 (briefLastText) → 收入本 turn 自己的气泡 (`链接 正文`) 收口, 不另发消息;
+   *  气泡已收/不在 → 正文走 standalone (有内容才有资格发)。
+   *  没有正文 → 一个字都不写: finish=true 是整条覆盖, 空收口只会把 `链接 …`/CoT
+   *  进度行覆盖成光秃秃的链接。气泡保持现有内容, 由 WeCom 6min 窗口自然到期。 */
+  const closeBriefTurn = (a: AttachState): void => {
     if (!a.briefTurnId) return;
-    if (soft) concludeBriefTurn(a, a.briefLastText ?? "");
-    // 气泡还开着 (正文始终没到) —— 以 ack 时就挂出的纯详情链接收口。
-    if (a.briefBubble && !a.briefBubble.done) {
-      void finishBriefBubble(a, briefDetailLink(a.briefTurnId, a.target), true);
-    }
+    concludeBriefTurn(a, a.briefLastText ?? "");
     recordTurnClose(a.briefTurnId);
     log.info({ sessionId: a.sessionId, turnId: a.briefTurnId }, "brief: turn closed");
     a.briefTurnId = undefined;
@@ -2680,10 +2685,13 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       a.briefLastText = item.body;
       if (item.final === false) markBriefTool(a);
       if (item.final === true) concludeBriefTurn(a, item.body);
+      // 非终句文本 (中途叙述, 软后端含最终答案本身) 也是 CoT —— 推进进度行。
+      // 终句走 conclude 直接定稿气泡, clearCot 会撤掉可能挂着的进度刷新。
+      else updateBriefProgress(a, item.body);
       return;
     }
     if (item.kind === "turn_end") {
-      closeBriefTurn(a, item.soft === true);
+      closeBriefTurn(a);
       return;
     }
     if (item.kind === "turn_usage") {
@@ -2750,7 +2758,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.softEnd = undefined;
     log.debug({ sessionId: a.sessionId, turnId: a.briefTurnId }, "soft turn_end confirmed");
     if (a.goalActive) { handleGoalItem(a, { kind: "turn_end" }); return; }
-    if (cfg.wrc.mirror.brief && a.briefTurnId) { closeBriefTurn(a, true); return; }
+    if (cfg.wrc.mirror.brief && a.briefTurnId) { closeBriefTurn(a); return; }
     if (a.liveStream && !a.liveStream.closed) void finalizeStream(a, a.liveStream);
   };
 
@@ -4730,17 +4738,18 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       if (armMigration) a.ctxCut = "clear";
       // 新消息 = 对话边界: 上一 turn 的出站状态在此清算。softEnd 是旧 turn 的
       // 静默期收口判决, 残留到新 turn 会在中途开火、提前收掉新气泡/新流;
-      // deferred 缓冲里是已从 tail 消费但还没下发的 item, 直接丢弃 = 静默丢失,
-      // 冲成 standalone 收尾。旧 frame 就此作废; 用户之后点旧审批卡,
-      // terminateLiveStream 找不到 outbound 槽位会优雅 no-op。
+      // deferred 缓冲里是已从 tail 消费但还没下发的 item, 收入旧 streamId 收口
+      // (exitDeferredAsFinalStream): 正文进流关掉 loading 气泡, 只有 trailing 终句
+      // 才走 standalone, 空缓冲一个字都不写 —— 不再整体另发 standalone。旧 frame
+      // 就此作废; 用户之后点旧审批卡, terminateLiveStream 找不到 outbound 槽位会
+      // 优雅 no-op。
       if (a.softEnd) { clearTimeout(a.softEnd); a.softEnd = undefined; }
       if (a.outbound) {
         if (a.outbound.kind === "deferred") {
-          clearTimeout(a.outbound.timer);
-          const md = renderBuf(a.outbound.buf);
-          if (md) sendStandalone(a, md);
+          exitDeferredAsFinalStream(a);
+        } else {
+          a.outbound = undefined;
         }
-        a.outbound = undefined;
       }
       // Drain any pending standalone debounce so a prior turn's tail tail
       // doesn't get sandwiched into this turn's pre-card flush (Path A) or
