@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+### Added
+- `mirror` brief: **气泡在正文落地前实时显示 CoT 进度**。一轮里正文要等 final text 才落地,中间几十秒到几分钟气泡只有一个 `…`;现在最新的 thinking(codebuddy 的 reasoning 归一后的 `thinking` 块)与工具调用会持续覆盖进这条未收口的气泡,形态为 `tag 详情链接 \`进度片段\``,单行定长 100 字符、刷新节流 1.5s。只写"还没收口的气泡":结论一到即被 `链接 正文` 整条替换,进度不残留在最终气泡里 —— 这是它与已下线的 thinkStyle 的分界线(后者把整轮 reasoning 拼进正文,单条体积翻几倍被分页切成多页刷屏)。
+
 ### Changed
 - `mirror` brief: **收到消息那一刻就把详情链接挂进气泡**,ack 内容从 `…` 变成 `tag 详情链接 …`。链接的三个入参(turnId / target / host)在收消息时全部已知 —— turnId 本地生成、详情页记录由 `recordTurnStart` 先建好 —— 所以无需等任何 CLI 产出;尾随的 `…` 表示"正文还没到",正文到位时整条内容被 `链接 正文` 覆盖,始终没正文则以纯链接收口。此前是"3s 无产出才补链接"的 `earlyTimer`,既被 codebuddy 后端整体跳过,又会被 `user_text` 清表,实际常年不触发,气泡整轮停在纯文本占位上。
 - `mirror` 分页预算改按**字节**计,单页上限抬到 3800B(`wrc.mirror.chunkChars` → `chunkBytes`,默认 `1800` → `3800`)。企微 markdown 的 `content` 上限是 4096 **字节**而非字符,旧的字符预算对英文浪费了大半页,对中文又必然超限;`shared/md-chunk` 的 `sizeOf` / `sliceLine` 同步改成 `Buffer.byteLength` 计量,长行按 code point 切(不再切断 emoji 代理对)。头部分片预留 32 → 64B(链接态 `[🧙 #tag](url)` 可达 110B)。

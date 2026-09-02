@@ -455,6 +455,8 @@ const DETAIL_RESULT_MAX = 64 * 1024;
 // of band on the item so the caller can register them for click-to-detail.
 type RenderItem =
   | { kind: "text"; body: string; final?: boolean }
+  // 只驱动 brief 气泡的 CoT 进度行 —— 正文/standalone/detail 所有通道都不收它。
+  | { kind: "thinking"; body: string }
   // CLI-side user line (not a WeCom inject). Marks a turn boundary that did
   // NOT originate from the still-open WeCom liveStream — onItem uses this to
   // finalize the prior bubble so the new conversation gets its own bubble.
@@ -703,8 +705,12 @@ const renderLine = (raw: string, deps: TailDeps): RenderItem[] => {
         // 同名扩展当前 group; 不同名先 flush 再起新组。
         if (pending.length > 0 && pending[0]!.name !== name) flushPending();
         pending.push({ toolUseId, name, input: b.input });
+      } else if (b?.type === "thinking" && typeof b.thinking === "string") {
+        // codebuddy 的 reasoning 记录已被 normalizeLine 归一成这个形状。
+        // 只作为 CoT 进度源发出: onItem 里它唯一的下游是 brief 进度行, 不进正文。
+        const thought = b.thinking.trim();
+        if (thought) out.push({ kind: "thinking", body: thought });
       }
-      // thinking blocks intentionally skipped (只进详情页)
     }
     flushPending();
     // Emit per-line usage snapshot BEFORE turn_end so brief store gets the last
@@ -1823,6 +1829,11 @@ interface AttachState {
   briefConcluded?: boolean;
   /** 本 turn 最近一条 assistant text。软收口没有"终句"标记, 收口时拿它当结论。 */
   briefLastText?: string;
+  /** brief 气泡的 CoT 进度 —— 最新一条 thinking / 工具调用, 已压成单行。只在正文落地前
+   *  覆盖气泡: 结论一到, 气泡被 `链接 正文` 整条替换掉, 进度不会残留在最终气泡里。 */
+  cotText?: string;
+  /** CoT 进度的节流计时器 —— 每次刷新都是整条内容重发, 高频 thinking 不能 1:1 打上去。 */
+  cotTimer?: NodeJS.Timeout;
   /** 软收口的静默期计时器 —— 任何新 item 到达即撤销。 */
   softEnd?: NodeJS.Timeout;
   /** CLI 侧最近一条用户输入, 用作下一个"无气泡 turn"(ensureBriefTurn) 的 userQuery。
@@ -2354,6 +2365,58 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // 能证明"assistant 已经在产出"的 item —— 见到它们才补开无气泡 turn。
   const BRIEF_TURN_OPENERS = new Set<RenderItem["kind"]>(["text", "tool_use", "tool_result", "skill_output"]);
 
+  // ── CoT 进度行 (brief 气泡) ─────────────────────────────────────────
+  // 一轮里正文要等 final text 才落地, 中间几十秒到几分钟气泡只有一个 "…"。这里把最新的
+  // thinking / 工具调用覆盖进这条还没收口的气泡, 让群里看得到进展。三条硬约束:
+  //   • 只写"还没收口的气泡" —— 结论一到 finishBubble 就用 `链接 正文` 整条替换, 进度
+  //     不会留在最终气泡里 (这是它与已下线的 thinkStyle 的分界线: 那次是把整轮 reasoning
+  //     拼进正文, 单条体积翻几倍被 md-chunk 切成多页刷屏);
+  //   • 单行定长 (COT_MAX_CHARS), 无论 thinking 多长恒定一行, 不存在刷屏可能;
+  //   • 节流 —— 气泡刷新是整条内容重发, 高频 thinking 不能 1:1 打到 stream 上。
+  const COT_MAX_CHARS = 100;
+  const COT_FLUSH_MS = 1500;
+
+  // 压成一行的进度片段。safeForMarkdown 必须先于截断: thinking 里一个裸反引号就能提前
+  // 闭合代码段, 让后面的正文裸奔在链接旁边。
+  const cotLine = (s: string): string => {
+    const flat = safeForMarkdown(s.replace(/\s+/g, " ").trim());
+    return flat.length <= COT_MAX_CHARS ? flat : `${flat.slice(0, COT_MAX_CHARS)}…`;
+  };
+
+  const cotToolLabel = (calls: Array<{ name: string; input: unknown }>): string =>
+    calls.map((c) => `${c.name} ${renderToolInputCompact(c.input, 60)}`.trim()).join(" / ");
+
+  const clearCot = (a: AttachState): void => {
+    if (a.cotTimer) { clearTimeout(a.cotTimer); a.cotTimer = undefined; }
+    a.cotText = undefined;
+  };
+
+  const flushCot = async (a: AttachState): Promise<void> => {
+    a.cotTimer = undefined;
+    const text = a.cotText;
+    a.cotText = undefined;
+    const b = a.briefBubble;
+    const turnId = a.briefTurnId;
+    // 收口后这一路全部失效: 气泡要么已 done, 要么 turn 已经换人/清空。
+    if (!text || !b || b.done || !turnId || a.briefConcluded) return;
+    try {
+      await client.replyStream(b.frame, b.streamId, `${briefDetailLink(turnId, a.target)} \`${text}\``, false);
+    } catch (e) {
+      log.debug({ sessionId: a.sessionId, turnId, err: (e as Error).message }, "brief: cot refresh failed");
+    }
+  };
+
+  /** 推进气泡里的 CoT 进度。节流窗口内到达的多条只留最后一条 —— 进度永远只展示"最新"。 */
+  const updateBriefProgress = (a: AttachState, raw: string): void => {
+    const b = a.briefBubble;
+    if (!b || b.done || a.briefConcluded) return;
+    const line = cotLine(raw);
+    if (!line) return;
+    a.cotText = line;
+    if (a.cotTimer) return;
+    a.cotTimer = setTimeout(() => void flushCot(a), COT_FLUSH_MS);
+  };
+
   // 链接落到 chat 视图: 默认选中本 turn 所属的 #tag, 贴底显示整条会话。turnId 依旧
   // 是凭据 (不可枚举), 只是页面从"一个 turn"扩成"这个 chat 的全部会话"。
   // target 作为 ww_uniq 传下去, 让同 chat 的所有 turn 详情都复用一个 WeCom 窗口。
@@ -2376,6 +2439,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     b.done = true;
     clearTimeout(b.hardTimer);
     if (a.briefBubble === b) a.briefBubble = undefined;
+    // 气泡要定稿了 —— 排队中的 CoT 进度必须撤掉, 否则它会把 `链接 正文` 覆盖回进度行。
+    clearCot(a);
     const p = (async () => {
       try {
         await client.replyStream(b.frame, b.streamId, raw ? (content || " ") : withLinkedTag(a, content || " "), true);
@@ -2401,6 +2466,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.briefHadTool = false;
     a.briefConcluded = false;
     a.briefLastText = undefined;
+    clearCot(a); // turn 级状态 —— 进度行跟着气泡走, 不能跨 turn 残留
     log.info({ sessionId: a.sessionId, turnId: q.turnId, isSlash: q.isSlash }, "brief: turn started");
   };
 
@@ -2474,6 +2540,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.briefHadTool = false;
     a.briefConcluded = false;
     a.briefLastText = undefined;
+    clearCot(a);
     sendRaw(a, briefDetailLink(turnId, a.target));
     log.info({ sessionId: a.sessionId, turnId }, "brief: turn started (CLI-side, no bubble)");
   };
@@ -2520,6 +2587,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.briefIsSlash = false;
     a.briefConcluded = false;
     a.briefLastText = undefined;
+    clearCot(a);
     // 放行下一个排队的 turn —— 它的气泡早在 ack 时就挂出去了, 这里只是激活。
     const next = a.briefQueue?.shift();
     if (next) openBriefTurn(a, next);
@@ -2546,6 +2614,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       closed++;
       closeBriefTurn(a);
     }
+    clearCot(a); // 无 turn 也要撤: 它可能正挂在一个已被 finish 掉的气泡上
     if (a.softEnd) { clearTimeout(a.softEnd); a.softEnd = undefined; }
     if (a.outbound) {
       if (a.outbound.kind === "deferred") clearTimeout(a.outbound.timer);
@@ -2604,6 +2673,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const now = Date.now();
     if (item.kind === "tool_use") {
       markBriefTool(a);
+      updateBriefProgress(a, cotToolLabel(item.calls));
       for (const c of item.calls) {
         // 也走单卡 detail record — turn 页里 tool_use 段可点开链到独立详情 (以后有需要时)。
         if (c.toolUseId) {
@@ -2749,6 +2819,13 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // 任何新 item 到达 = 上一条"消息写完了"并不代表这一轮结束 → 撤销待确认的软收口。
     // 硬信号 (end_turn / turn_duration) 的后端永远不会走到这里。
     if (a.softEnd) { clearTimeout(a.softEnd); a.softEnd = undefined; }
+    // thinking 唯一的出口是 brief 气泡的 CoT 进度行。必须在这里就吃掉 —— 漏到下面任何
+    // 一条通道 (deferred buf → renderBuf / standalone / stream append) 都会把它写进正文,
+    // 那就变回已下线的 thinkStyle 了。
+    if (item.kind === "thinking") {
+      if (cfg.wrc.mirror.brief && a.briefTurnId) updateBriefProgress(a, item.body);
+      return;
+    }
     if (item.kind === "turn_end" && item.soft === true) {
       a.softEnd = setTimeout(() => fireSoftTurnEnd(a), softTurnEndMsFor(a));
       return;
