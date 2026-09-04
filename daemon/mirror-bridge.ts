@@ -1728,7 +1728,8 @@ interface ToolEntry {
 
 /** Brief turn 的气泡 —— ack 时就把 `tag 详情链接 …` 写进去 (finish=false, 不关闭),
  *  所以从收消息那一刻起群里就有可点的详情页入口, 而不是一个纯文本占位。后续:
- *  正文到位 → 以 `链接 正文` 覆盖收口; 一直没正文 → hardTimer 兜底以纯链接收口。
+ *  正文到位 → 以 `链接 正文` 覆盖收口; 一直没正文 → hardTimer 兜底以最新 CoT
+ *  进度行 (从未有过则纯链接) 收口。
  *  hardTimer 兜底 WeCom ~6min stream 窗口, 到点强制 finish=true。 */
 interface BriefBubble {
   frame: WsFrameHeaders;
@@ -1779,7 +1780,7 @@ interface AttachState {
    *  Diverges from `pendingCwd` when the user has requested a switch but
    *  hasn't yet hit /new — /clear bridges the gap by upgrading to /new. */
   runningCwd: string;
-  /** User-requested next cwd (set via `cd` MCP tool). Applied at
+  /** User-requested next cwd (set via the `set_workspace` MCP tool). Applied at
    *  next /new (or /clear → upgraded to /new). Cleared after the spawn. */
   pendingCwd: string;
   tail: TailHandle;
@@ -2408,7 +2409,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // 每个 turn 挂一条气泡: ack 时就写进 `tag 详情链接 …` (finish=false, 不立刻关掉),
   // 让群里从收到消息那一刻起就有详情页入口。收口时:
   //   • 正文到位 → 以 `链接 正文` 覆盖这条气泡。
-  //   • 始终没正文 / 过 6min 窗口 → 以 ack 时那条纯 `链接` 收口。
+  //   • 始终没正文 / 过 6min 窗口 → 以最新 CoT 进度行 (没有则纯 `链接`) 收口。
   //   • 气泡已收口或无气泡 turn (CLI 侧发起) → 正文另发一条 standalone。
   // 其它所有 item 只写入 turn detail store。
   // 能证明"assistant 已经在产出"的 item —— 见到它们才补开无气泡 turn。
@@ -2544,8 +2545,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const bubble: BriefBubble = { frame, streamId, hardTimer: undefined as unknown as NodeJS.Timeout, done: false };
     const q: QueuedTurn = { turnId, bubble, isSlash };
     bubble.hardTimer = setTimeout(() => {
-      // WeCom ~6min stream 窗口快到, 必须 finish=true 收口。
-      void finishBubble(a, bubble, briefDetailLink(turnId, a.target), true);
+      // WeCom ~6min stream 窗口快到, 必须 finish=true 收口。没正文时不能拿光链接
+      // 覆盖 —— finish 是整条替换, 会把屏幕上的 CoT 进度行抹成光秃秃的链接; 改用
+      // 最新进度行定格 (a 上的 CoT 只在气泡仍是本轮活跃气泡时才可信, 换轮后归新轮)。
+      const cot = a.briefBubble === bubble && !a.briefConcluded ? a.cotText ?? a.cotLastSent : undefined;
+      void finishBubble(a, bubble, `${briefDetailLink(turnId, a.target)}${cot ? ` \`${cot}\`` : ""}`, true);
     }, HARD_TIMEOUT_MS);
     // 新消息 = 对话边界: 立刻收掉上一 turn, 新 turn 直接激活、不排队。收口语义见
     // closeBriefTurn: 有正文收入旧气泡, 没正文不写一个字 (绝不因边界结束凭空新发/
@@ -3809,35 +3813,13 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // the AI sets a new path but the user hasn't /new'd yet.
   const expandedDefaultCwd = expandHome(cfg.wrc.cwd);
 
-  // Long absolute paths wrap in the WeCom bubble — show only the trailing
-  // three segments, which is enough to identify the project.
-  const shortCwd = (p: string): string => p.split("/").filter(Boolean).slice(-3).join("/");
-
-  const renderProjectInfo = (target: string): string => {
-    const a = byTarget.get(target);
-    const rec = a ? undefined : deps.store.get(target);
-    const running = (a?.runningCwd?.trim()) || rec?.cwd?.trim() || expandedDefaultCwd;
-    // pendingCwd is chat-scoped — the queued switch applies to every session
-    // in this chat, so read it from the shared base slot rather than the
-    // caller's own (now-empty) attachment record.
-    const pending = chatCwdFallback(target).pending;
-    const lines = [`📂 cwd: \`${shortCwd(running)}\``];
-    if (pending && pending !== running) {
-      lines.push(`下次切换: \`${shortCwd(pending)}\` (使用 /new 或 /clear 生效)`);
-    }
-    // Session-boundary footer — `/new` and `/clear` are the only two callers,
-    // so the tip lands exactly once per fresh context, never mid-conversation.
-    lines.push(randomTip());
-    return lines.join("\n");
-  };
-
   // `header` folds the caller's ack ("created") into this same bubble — /new
   // must land as exactly ONE WeCom message, not card + separate reply.
-  // slashAckFirstLine: 会话边界回执只保留首行 ack, 📂 项目信息与 💡 tip 省去。
+  // 会话边界回执一律不携带 cwd 信息 (📂 项目行 / 下次切换), 需要时 `/pwd` 可查。
+  // slashAckFirstLine 进一步省去 💡 tip, 只剩首行 ack。
   const pushProjectInfo = (target: string, header?: string): void => {
     const concise = cfg.wrc.mirror.slashAckFirstLine && !!header;
-    const info = concise ? "" : renderProjectInfo(target);
-    const md = header ? (info ? `${header}\n\n${info}` : header) : info;
+    const md = header ? (concise ? header : `${header}\n\n${randomTip()}`) : randomTip();
     const a = byTarget.get(target);
     if (a) {
       sendStandalone(a, md);
@@ -3855,7 +3837,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // (default + any `#tag` siblings) share one cwd/pendingCwd, tracked on the
   // BASE principal's byTarget/store record. Tagged sessions still have their
   // own `runningCwd` (the tmux pane's actual working dir at spawn time), but
-  // cwd fallbacks and `cd` pendingCwd writes always resolve against the base.
+  // cwd fallbacks and `set_workspace` pendingCwd writes always resolve against the base.
   const chatCwdFallback = (target: string): { pending: string; running: string } => {
     const base = basePrincipalOf(target);
     const baseA = byTarget.get(base);
@@ -3880,7 +3862,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     //   base.pending > caller.pending > target.running > base.running > default
     // A fresh tagged session inherits the chat's current cwd; re-`/new`ing a
     // live tagged session keeps its pane cwd unless the base session queued a
-    // `cd`. This keeps siblings aligned by default without forcibly clobbering
+    // cwd switch. This keeps siblings aligned by default without forcibly clobbering
     // an already-spawned tagged pane on every base-cwd change.
     const chat = chatCwdFallback(target);
     const rec = !prev ? deps.store.get(target) : undefined;
@@ -3973,9 +3955,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   };
 
   const getCwd = (target: string): { runningCwd: string; pendingCwd: string; defaultCwd: string } => {
-    // pendingCwd is chat-scoped — a `cd` from any sibling session queues the
-    // switch for the whole chat. runningCwd stays per-session (each pane has
-    // its own spawn dir).
+    // pendingCwd is chat-scoped — a `set_workspace` from any sibling session
+    // queues the switch for the whole chat. runningCwd stays per-session (each
+    // pane has its own spawn dir).
     const chat = chatCwdFallback(target);
     const pending = chat.pending;
     const a = byTarget.get(target);
@@ -3986,9 +3968,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   };
 
   // Write `pendingCwd` to the BASE principal so the switch applies chat-wide —
-  // the next /new in any tagged/untagged session picks it up. `cd` from a
-  // tagged session still writes to the shared slot, not the tagged session's
-  // own record, matching "sessions share the chat's cwd".
+  // the next /new in any tagged/untagged session picks it up. `set_workspace`
+  // from a tagged session still writes to the shared slot, not the tagged
+  // session's own record, matching "sessions share the chat's cwd".
   const setPendingCwd = (
     target: string,
     cwd: string,
@@ -4456,7 +4438,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     },
     targetForSession: (sessionId) => {
       // Live attach is the fast path. Fall back to scanning persisted store:
-      // an MCP tool (e.g. `cd`) called from a claude that isn't mirror-attached
+      // an MCP tool (e.g. `set_workspace`) called from a claude that isn't mirror-attached
       // would otherwise miss here and silently retarget to defaultChat — that
       // bug stranded pendingCwd on the wrong principal. Store keeps each
       // target's sessionId in sync via migrate/attach/setPendingCwd writes.
@@ -5039,10 +5021,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // and surface a standalone "cleared" so the user gets explicit
         // feedback (the skip-stream path otherwise leaves WeCom silent).
         if (armMigration) {
-          // slashAckFirstLine: 只回首行 ack, 项目信息/tip 省去 (与 /new 一致)。
+          // cwd 不随回执下发 (/pwd 可查); slashAckFirstLine 连 tip 也省去 (与 /new 一致)。
           sendStandalone(a, cfg.wrc.mirror.slashAckFirstLine
             ? "cleared"
-            : `cleared\n\n${renderProjectInfo(a.target)}`);
+            : `cleared\n\n${randomTip()}`);
           a.clearRebind = { baseline: preClearBaseline! };
           startMigrationWatcher(a, preClearBaseline!, jsonlIsPostClearChild, 0, true);
         }

@@ -154,21 +154,20 @@ server.registerTool(
   },
 );
 
-// set_workspace — one-shot project switch. Replaces the old `enter` tool's
-// two-step dance (queue pendingCwd, then ask a human to send `/new` from the
-// WeCom side): the daemon applies the switch itself by walking the exact /new
-// path — setPendingCwd → kill pane → respawn in the new cwd → attach →
-// "📂 当前项目" push. NOTE: when the caller IS the chat's session being
-// replaced (the common case), its own pane is killed mid-tool-call — the tool
-// result never returns, and the project-info bubble in the chat is the
-// receipt. On spawn failure the pendingCwd stays queued, so a manual /new
-// from WeCom still completes the switch.
+// set_workspace — one-shot project switch: the daemon applies the switch
+// itself by walking the exact /new path — setPendingCwd → kill pane →
+// respawn in the new cwd → attach → "📂 当前项目" push. NOTE: when the
+// caller IS the chat's session being replaced (the common case), its own
+// pane is killed mid-tool-call — the tool result never returns, and the
+// project-info bubble in the chat is the receipt. On spawn failure the
+// pendingCwd stays queued, so a manual /new from WeCom still completes
+// the switch.
 server.registerTool(
   "set_workspace",
   {
     title: "Switch workspace directory",
     description:
-      "Switch this chat's Claude session to a different project directory in ONE shot: kill the current pane and spawn a FRESH session rooted at the given cwd — exactly what the user gets by sending `/new` from the WeCom side after a `cd`. The chat receives the new session's 📂 project-info bubble as the receipt; conversation context is NOT carried over (fresh session, same as /new). If the caller is the session being replaced it is terminated mid-call — expected, the bubble is the receipt. Use absolute paths (or paths starting with ~).",
+      "Switch this chat's Claude session to a different project directory in ONE shot: kill the current pane and spawn a FRESH session rooted at the given cwd — equivalent to a /new into that directory. The chat receives the new session's 📂 project-info bubble as the receipt; conversation context is NOT carried over (fresh session, same as /new). If the caller is the session being replaced it is terminated mid-call — expected, the bubble is the receipt. Use absolute paths (or paths starting with ~).",
     inputSchema: {
       cwd: z.string().describe("Absolute project path, e.g. /Users/foo/projects/bar. ~ is expanded."),
       target: z

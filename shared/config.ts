@@ -101,8 +101,8 @@ const Mirror = z.object({
   // 授权卡照常发群 (交互无法替代)。false = 现状 (逐条气泡)。
   brief: z.boolean().default(true),
   // 斜杠命令回执精简: /clear、/new 等会话边界命令的回执只发第一行 ack
-  // ("cleared" / "created"), 不再附 📂 项目信息与 💡 tip。cwd 随时 `/pwd` 可查。
-  // 默认 false = 现状 (ack + 项目信息 + tip 多行气泡)。
+  // ("cleared" / "created"), 不再附 💡 tip。cwd 信息一律不随回执下发, 随时
+  // `/pwd` 可查。默认 false = ack + tip 两行气泡。
   slashAckFirstLine: z.boolean().default(false),
   // 软收口静默期 (ms)。codebuddy 后端只能说"这条消息写完了", 等这么久没有新 item
   // 才认定一轮结束。值越大越不容易误收 (model 思考时间长), 但用户等最终结论的延迟也

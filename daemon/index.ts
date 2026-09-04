@@ -428,8 +428,7 @@ const main = async (): Promise<void> => {
     });
     // One-shot project switch: bind the chat-wide cwd AND apply it right here
     // by walking the exact /new path (kill pane → respawn in pendingCwd →
-    // attach → "📂 当前项目" push). Replaces the old two-step /mirror/cwd +
-    // human-sent /new that the `enter` MCP tool required. Resolved target
+    // attach → "📂 当前项目" push). Resolved target
     // precedence: explicit body.target → sessionId-derived (so MCP can omit
     // it) → tmuxPane (stable across /clear) → cfg.defaultChat. When the caller
     // IS the session being replaced, its pane dies mid-tool-call — the
