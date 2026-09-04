@@ -4,7 +4,7 @@
 
 <h1>wezard</h1>
 
-<p><b>把 Claude Code 装进企业微信。</b><br/>在地铁上、被窝里、开会摸鱼时，照样能跟你电脑上的 Claude 干活。</p>
+<p><b>把 AI 编程 Agent 装进企业微信。</b><br/>在地铁上、被窝里、开会摸鱼时，照样能跟你电脑上的 Agent 干活。</p>
 
 <p>
   <a href="https://www.npmjs.com/package/wezard"><img src="https://img.shields.io/npm/v/wezard?style=flat-square&color=07C160&label=npm" alt="npm version" /></a>
@@ -21,14 +21,14 @@
 
 | 功能<img width="160"> | 说明 |
 | --- | --- |
-| 🛎 **远程审批** | Claude 要跑 `Bash` / `Edit`？审批卡片直推 IM，点 ✅/❌/⏱（放行 N 分钟）。 |
-| 📋 **计划审批** | Claude 在 plan mode 结束（`ExitPlanMode`）时，把计划摘要 + 审批卡推到 IM：点 ✅同意 退出 plan mode 开始执行，或 ✏️继续改 留在 plan mode 继续完善。`AskUserQuestion` 多选题也镜像为投票卡。 |
-| 🪞 **会话镜像** | 你电脑上跑的 Claude 流式打字、tool_use、思考过程，实时同步到企业微信；IM 里发消息原样落进 CLI 输入框。 |
-| 🖼 **图片直贴** | 企业微信发图，自动走 macOS 剪贴板 + tmux 粘贴，Claude 当贴图处理（不走 Read，不耗 token）。 |
+| 🛎 **远程审批** | Agent 要跑 `Bash` / `Edit`？审批卡片直推 IM，点 ✅/❌/⏱（放行 N 分钟）。 |
+| 📋 **计划审批** | Agent 在 plan mode 结束（`ExitPlanMode`）时，把计划摘要 + 审批卡推到 IM：点 ✅同意 退出 plan mode 开始执行，或 ✏️继续改 留在 plan mode 继续完善。`AskUserQuestion` 多选题也镜像为投票卡。 |
+| 🪞 **会话镜像** | 你电脑上跑的 Agent 流式打字、tool_use、思考过程，实时同步到企业微信；IM 里发消息原样落进 CLI 输入框。 |
+| 🖼 **图片直贴** | 企业微信发图，自动走 macOS 剪贴板 + tmux 粘贴，Agent 当贴图处理（不走 Read，不耗 token）。 |
 | 🔍 **细节页** | 工具调用 / 审批请求都生成本地 HTML 详情页，IM 里点链接看完整 input / result / git diff。 |
-| 📡 **MCP 主动推送** | Claude 通过 `wecom__send_markdown` / `wecom__send_card` / `wecom__ask_user` 主动汇报或问询。 |
-| 📄 **文档读写** | Claude 通过 `wecom_doc_list_tools` / `wecom_doc_call` 直接调企业微信智能机器人的 doc / smartsheet / smartpage MCP，新建在线文档、写 Markdown、读链接、操作智能表格——全程在内网，不需要 corp access_token。 |
-| 🗂 **多会话发现/切换** | Claude 通过 `list_claude_sessions` / `switch_claude_session` / `new_claude_session` 列出本机 tmux 内所有在跑的会话（带摘要 + 稳定动物 emoji 标签）、切换 IM 镜像、或在指定路径新开会话。审批卡标题也带同一枚 emoji，多会话兜底到同一 IM 时一眼区分。 |
+| 📡 **MCP 主动推送** | Agent 通过 `wecom__send_markdown` / `wecom__send_card` / `wecom__ask_user` 主动汇报或问询。 |
+| 📄 **文档读写** | Agent 通过 `wecom_doc_list_tools` / `wecom_doc_call` 直接调企业微信智能机器人的 doc / smartsheet / smartpage MCP，新建在线文档、写 Markdown、读链接、操作智能表格——全程在内网，不需要 corp access_token。 |
+| 🗂 **多会话发现/切换** | Agent 通过 `list_claude_sessions` / `switch_claude_session` / `new_claude_session` 列出本机 tmux 内所有在跑的会话（带摘要 + 稳定动物 emoji 标签）、切换 IM 镜像、或在指定路径新开会话。审批卡标题也带同一枚 emoji，多会话兜底到同一 IM 时一眼区分。 |
 | 🔄 **重启即续** | 电脑重启 / tmux 全没了 / daemon 崩了都不掉档：IM ↔ 会话绑定持久化在 `~/.wezard/mirror-attachments.json`，下一条 IM 消息自动 `claude --resume` 拉起新 tmux pane，历史完整继承；`tmux attach -t wezard` 接管即可。 |
 
 <details>
@@ -71,7 +71,7 @@ wezard init
 | wrc 模式（`mirror` 推荐 / `headless`） | `~/.wezard/config.jsonc` |
 | 是否开启 PreToolUse 远程审批 | `~/.wezard/config.jsonc` |
 
-然后自动：编译 → 注入 hook/MCP（claude 家族装 wezard 插件，codebuddy 直接写 settings.json）→ 装 svr 详情中继 → 装常驻 daemon（macOS launchd / Linux systemd --user）→ 等 WebSocket 鉴权。已装过的凭证默认复用，还会把 Claude Code 的 `permissions` 一次性导入审批规则。
+然后自动：编译 → 注入 hook/MCP（claude 家族装 wezard 插件，codebuddy 直接写 settings.json）→ 装 svr 详情中继 → 装常驻 daemon（macOS launchd / Linux systemd --user）→ 等 WebSocket 鉴权。已装过的凭证默认复用，还会把所选 CLI 的 `permissions` 一次性导入审批规则。
 
 **最后一步：绑定默认会话。** CLI 提示后，**在企业微信里**给机器人发：
 
@@ -83,46 +83,46 @@ wezard init
 
 **绑定之后，按这个顺序把会话跑起来**（mirror 模式）：
 
-1. **发首条消息**：在企微里随便说句话（比如 `hi`）。首条消息既是绑定信号也是第一句 prompt——daemon 自动拉起 tmux 窗口 + Claude 会话，回复逐字流式推回 IM。回家打开终端 `tmux attach -t wezard` 就能接管，对话一字不少。
+1. **发首条消息**：在企微里随便说句话（比如 `hi`）。首条消息既是绑定信号也是第一句 prompt——daemon 自动拉起 tmux 窗口 + Agent 会话，回复逐字流式推回 IM。回家打开终端 `tmux attach -t wezard` 就能接管，对话一字不少。
 2. **切到你的项目**：新会话默认落在 `~/.wezard/workspace`，直接对 AI 说「切到 /path/to/proj」——它调 `set_workspace` MCP 一步换目录重开会话，收到 📂 项目回执即切换完成，`/pwd` 可随时确认。
-3. **第一次审批**：Claude 要跑 `Bash` / `Edit` 时，IM 会弹按钮卡，点 ✅/❌/⏱（放行 N 分钟）即可；点卡片里的链接看完整 input / result / git diff。
+3. **第一次审批**：Agent 要跑 `Bash` / `Edit` 时，IM 会弹按钮卡，点 ✅/❌/⏱（放行 N 分钟）即可；点卡片里的链接看完整 input / result / git diff。
 4. **`/h` 拉出命令表**：`/new` 开新会话、`/clear` 清上下文、`/sessions` 切换、`#tag` 并行多会话、`/usage` `/cost` 查额度……全部命令一屏可查。
 
 ---
 
 ## 镜像模式
 
-IM 来消息 → tmux 粘进活的 TUI，CLI 里像你自己敲进去的一样；Claude 的回应、调用了哪些工具、思考过程都逐字流式推回 IM。一对一绑定 IM 聊天 ↔ tmux 窗口，原地累计上下文——真·远程结对编程。
+IM 来消息 → tmux 粘进活的 TUI，CLI 里像你自己敲进去的一样；Agent 的回应、调用了哪些工具、思考过程都逐字流式推回 IM。一对一绑定 IM 聊天 ↔ tmux 窗口，原地累计上下文——真·远程结对编程。
 
-IM 里发 `/new` 直接开新 tmux 窗口 + 新 Claude 会话；`/clear` 清当前上下文；带图消息自动注入剪贴板。所有 IM 聊天共享一个 tmux session（默认名 `wezard`），每个聊天一个独立 window，**关 tmux / daemon 崩了 / 整机重启都能自愈**：IM↔会话绑定 write-through 落到 `~/.wezard/mirror-attachments.json`，daemon 起来就 eager restore；重启后 pane 全死，下一条 IM 消息触发 `claude --resume <sid>` 拉起新 pane，`--resume` fork 出的新 jsonl 由 watcher 从 EOF 无缝接管（不会把整段历史再推一遍到 IM）。中途在别处 `/clear` 把 jsonl rotate 掉也不丢绑定，会自愈到同项目目录下最新的 jsonl。
+IM 里发 `/new` 直接开新 tmux 窗口 + 新 Agent 会话；`/clear` 清当前上下文；带图消息自动注入剪贴板。所有 IM 聊天共享一个 tmux session（默认名 `wezard`），每个聊天一个独立 window，**关 tmux / daemon 崩了 / 整机重启都能自愈**：IM↔会话绑定 write-through 落到 `~/.wezard/mirror-attachments.json`，daemon 起来就 eager restore；重启后 pane 全死，下一条 IM 消息触发 `claude --resume <sid>` 拉起新 pane，`--resume` fork 出的新 jsonl 由 watcher 从 EOF 无缝接管（不会把整段历史再推一遍到 IM）。中途在别处 `/clear` 把 jsonl rotate 掉也不丢绑定，会自愈到同项目目录下最新的 jsonl。
 
-> 💡 **mirror 不要求你必须先在 CLI 里开 tmux**：在企业微信里直接发 `/new` 就能从零起一个新 tmux 窗口 + Claude 会话；甚至首次发任意消息都会自动 spawn + 绑定（首条消息既是绑定信号也是第一句 prompt）。回家打开终端 `tmux attach -t wezard` 接管即可。
+> 💡 **mirror 不要求你必须先在 CLI 里开 tmux**：在企业微信里直接发 `/new` 就能从零起一个新 tmux 窗口 + Agent 会话；甚至首次发任意消息都会自动 spawn + 绑定（首条消息既是绑定信号也是第一句 prompt）。回家打开终端 `tmux attach -t wezard` 接管即可。
 
 ---
 
 ## 体验是什么样
 
-**审批场景**：你正在地铁上，电脑上的 Claude 想 `rm -rf node_modules` 重装。企业微信叮一声弹卡片：
+**审批场景**：你正在地铁上，电脑上的 Agent 想 `rm -rf node_modules` 重装。企业微信叮一声弹卡片：
 
 > 🛎 授权请求: Bash
 > `rm -rf node_modules`
 > [✅ 允许] [❌ 拒绝] [⏱ 5 分钟内自动允许]
 
-你点 ✅，卡片立刻刷新成 `✅ Bash · 已允许`，电脑上的 Claude 解除阻塞继续跑。
+你点 ✅，卡片立刻刷新成 `✅ Bash · 已允许`，电脑上的 Agent 解除阻塞继续跑。
 
-**镜像场景**：你 tmux 里开着 Claude 在写代码。出门后给机器人发：
+**镜像场景**：你 tmux 里开着 Agent 在写代码。出门后给机器人发：
 
 > 把刚才那个函数改成异步的
 
-这条消息自动粘进 CLI 输入框 + 回车提交。Claude 的回应、调用了哪些工具、改了哪些文件，逐字流式推回你 IM。回家打开终端，对话一字不少都在那里。
+这条消息自动粘进 CLI 输入框 + 回车提交。Agent 的回应、调用了哪些工具、改了哪些文件，逐字流式推回你 IM。回家打开终端，对话一字不少都在那里。
 
-**文档场景**：你给 Claude 说："周报给我整理成一篇企业微信文档"。Claude 自己调 `wecom_doc_list_tools` 看可用方法，再调 `wecom_doc_call` 走 `create_doc` 新建文档、`edit_doc_content` 写入 Markdown，最后把链接贴回会话——全程不离开 Claude，文档归属到你的 userid，每日 20 篇限额按 userid 计。
+**文档场景**：你给 Agent 说："周报给我整理成一篇企业微信文档"。Agent 自己调 `wecom_doc_list_tools` 看可用方法，再调 `wecom_doc_call` 走 `create_doc` 新建文档、`edit_doc_content` 写入 Markdown，最后把链接贴回会话——全程不离开会话，文档归属到你的 userid，每日 20 篇限额按 userid 计。
 
 ---
 
 ## 文档 / 智能表格 / 智能文档
 
-`wezard` 把企业微信智能机器人的远端 MCP（doc / smartsheet / contact）桥接到本地 Claude，**全程内网、不走 corp access_token**。Claude 先调 `wecom_doc_list_tools` 看某 category 有哪些方法，再调 `wecom_doc_call` 执行——新建在线文档、写 Markdown、读链接、操作智能表格。首次用需在「工作台 - 智能机器人 - 可使用权限」里勾选「文档」「智能表格」。
+`wezard` 把企业微信智能机器人的远端 MCP（doc / smartsheet / contact）桥接到本地 Agent，**全程内网、不走 corp access_token**。Agent 先调 `wecom_doc_list_tools` 看某 category 有哪些方法，再调 `wecom_doc_call` 执行——新建在线文档、写 Markdown、读链接、操作智能表格。首次用需在「工作台 - 智能机器人 - 可使用权限」里勾选「文档」「智能表格」。
 
 桥接机制、curl 验证、`requesterUserId` 解析规则见 [技术说明](技术说明.md#文档-mcp-如何桥接)。
 
@@ -132,7 +132,7 @@ IM 里发 `/new` 直接开新 tmux 窗口 + 新 Claude 会话；`/clear` 清当�
 
 一个轻量 pub/sub：任意群或单聊都能订阅一个 **topic**（自定义事件名），任何会话都能广播；daemon 内置分钟级调度器，每天定点自动推送。订阅关系与定时任务持久化到 `~/.wezard/config.jsonc` 的 `topics` 段，`wezard reload` 后自动恢复。
 
-**全部由 MCP 工具驱动**——直接对 Claude 说人话，它自己调工具，不用记命令语法：
+**全部由 MCP 工具驱动**——直接对 Agent 说人话，它自己调工具，不用记命令语法：
 
 | 说 | 工具 | 干什么 |
 | --- | --- | --- |
@@ -159,7 +159,7 @@ curl -sS -X POST http://127.0.0.1:17890/publish \
 
 ## 一个聊天里跑多个会话（`#tag` 路由）
 
-同一个 WeCom 聊天里可以同时挂多个并行 Claude session，靠消息里的 `#tag` 前缀路由。不带 tag 就是默认 session，与旧行为一致。
+同一个 WeCom 聊天里可以同时挂多个并行 Agent session，靠消息里的 `#tag` 前缀路由。不带 tag 就是默认 session，与旧行为一致。
 
 ![多会话](images/multi-session.png)
 
@@ -192,12 +192,12 @@ tagged session 的每条回复自带 `emoji #tag` 前缀（emoji 由 tag 名 has
 ```
 🦊 `#docs`
 
-（这里是 docs 会话的 Claude 回复……）
+（这里是 docs 会话的 Agent 回复……）
 ```
 
 默认 session 无前缀，视觉上保持简洁。
 
-**tag 语法**：`[\p{L}\p{N}_-]{1,32}`，支持中英文数字与 `_`、`-`；一条消息里只识别**第一个** `#tag`，后续的 `#foo` 原样透传给 Claude（不会误伤代码里的 `#include` 或 issue 引用）。
+**tag 语法**：`[\p{L}\p{N}_-]{1,32}`，支持中英文数字与 `_`、`-`；一条消息里只识别**第一个** `#tag`，后续的 `#foo` 原样透传给 Agent（不会误伤代码里的 `#include` 或 issue 引用）。
 
 **cwd 是聊天级的，不是 session 级**：同一聊天里所有 tagged / 默认 session **共用**一个 cwd。`/new #foo` 会在**当前聊天绑定的 cwd** 下起 pane；换项目直接对 AI 说「切到 /path/to/proj」，它调 `set_workspace` MCP **一步到位**——杀掉当前 pane、在新 cwd 重开新会话，聊天里以新会话的 📂 项目回执为准，上下文不延续。这样多 session 天然对齐到同一个项目根，切换 tag 时不用重新指路径。
 

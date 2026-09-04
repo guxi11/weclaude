@@ -743,7 +743,7 @@ const renderTurnPage = (r: TurnDetailRecord): string => {
     r.target || null,
     `${items.length} 项`,
   ].filter(Boolean) as string[];
-  const typing = done ? "" : `<div class="typing" data-key="typing">Claude 正在思考</div>`;
+  const typing = done ? "" : `<div class="typing" data-key="typing">Agent 正在思考</div>`;
   // markdown-it + highlight.js from unpkg CDN. html:false 防注入; linkify + breaks 更贴聊天。
   // 未 closed 时客户端 2s 轮询同一 URL — DOMParser 抽 .bubbles 后按 data-key reconcile:
   // 未变气泡复用原 DOM 节点 (连带用户手动展开/折叠的 <details> 一并保住), 变化/新增气泡
@@ -890,7 +890,7 @@ export const renderTurnGroup = (r: TurnDetailRecord, now = Date.now()): TurnFrag
         <div class="q-body">${escHtml(r.userQuery)}</div>
       </section>`
     : "";
-  const typing = done ? "" : `<div class="typing" data-key="${r.id}:typing">Claude 正在思考</div>`;
+  const typing = done ? "" : `<div class="typing" data-key="${r.id}:typing">Agent 正在思考</div>`;
   const inner = [queryBubble, ...bodies, typing].map(tagSig).join("");
   const head = `<div class="tg-head">
     <span class="tg-dot${done ? "" : " live"}"></span>

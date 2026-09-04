@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this project is
 
-`wezard` (CLI `wezard`) bridges Claude Code and WeCom (企业微信) smart bots:
+`wezard` (CLI `wezard`) bridges agent CLIs (Claude Code / claude-internal / CodeBuddy) and WeCom (企业微信) smart bots:
 - **PreToolUse approval forwarding**: every tool call is gated by a button card pushed to WeCom; clicking ✅/❌/⏱ resolves the long-poll the hook is parked on.
-- **Remote `/wrc`**: messages sent to the bot drive a local Claude (headless `claude -p` or mirroring an interactive session).
+- **Remote `/wrc`**: messages sent to the bot drive a local agent CLI (headless `claude -p` or mirroring an interactive session).
 - **MCP server** (`wecom`): exposes `send_markdown` / `send_card` / `ask_user` / `daemon_status` tools that talk to the resident daemon over loopback HTTP.
 
 ## Build / run

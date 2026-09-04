@@ -114,7 +114,7 @@ server.registerTool(
   "wrc",
   {
     title: "WeCom remote control",
-    description: "wecom remote control — attach current Claude session to a WeCom chat for live mirror push",
+    description: "wecom remote control — attach the current agent session to a WeCom chat for live mirror push",
     inputSchema: {
       target: z
         .string()
@@ -167,14 +167,14 @@ server.registerTool(
   {
     title: "Switch workspace directory",
     description:
-      "Switch this chat's Claude session to a different project directory in ONE shot: kill the current pane and spawn a FRESH session rooted at the given cwd — equivalent to a /new into that directory. The chat receives the new session's 📂 project-info bubble as the receipt; conversation context is NOT carried over (fresh session, same as /new). If the caller is the session being replaced it is terminated mid-call — expected, the bubble is the receipt. Use absolute paths (or paths starting with ~).",
+      "Switch this chat's agent session to a different project directory in ONE shot: kill the current pane and spawn a FRESH session rooted at the given cwd — equivalent to a /new into that directory. The chat receives the new session's 📂 project-info bubble as the receipt; conversation context is NOT carried over (fresh session, same as /new). If the caller is the session being replaced it is terminated mid-call — expected, the bubble is the receipt. Use absolute paths (or paths starting with ~).",
     inputSchema: {
       cwd: z.string().describe("Absolute project path, e.g. /Users/foo/projects/bar. ~ is expanded."),
       target: z
         .string()
         .optional()
         .describe(
-          'Optional target override. "vid:<userid>" / "chatid:<chatid>" / raw "user:<id>"/"chat:<id>". Empty → derive from this Claude session.',
+          'Optional target override. "vid:<userid>" / "chatid:<chatid>" / raw "user:<id>"/"chat:<id>". Empty → derive from the calling session.',
         ),
     },
   },
@@ -274,9 +274,9 @@ server.registerTool(
 server.registerTool(
   "list_claude_sessions",
   {
-    title: "List running Claude sessions",
+    title: "List running agent sessions",
     description:
-      "List all Claude Code sessions currently running in tmux on this host, each with a stable animal-emoji label, its working directory, tmux location, and a short summary of what it's recently been doing. Call this whenever the user asks to see / list / switch between Claude sessions (e.g. '列出所有 claude session', '有哪些会话在跑', '我想切换 session'). Present the result to the user as a readable numbered list (emoji + dir + summary), and note which one is the current mirror target (`current: true`).",
+      "List all agent sessions currently running in tmux on this host (claude / claude-internal / codebuddy backends alike), each with a stable animal-emoji label, its working directory, tmux location, and a short summary of what it's recently been doing. Call this whenever the user asks to see / list / switch between sessions (e.g. '列出所有 claude session', '有哪些会话在跑', '我想切换 session'). Present the result to the user as a readable numbered list (emoji + dir + summary), and note which one is the current mirror target (`current: true`).",
     inputSchema: {},
   },
   async () => {
@@ -289,9 +289,9 @@ server.registerTool(
 server.registerTool(
   "switch_claude_session",
   {
-    title: "Switch WeCom mirror to another Claude session",
+    title: "Switch WeCom mirror to another agent session",
     description:
-      "Re-point the WeCom mirror at a different already-running Claude session, so the user's IM chat starts mirroring (and injecting into) that session instead. Call this when the user picks a session to switch to — e.g. '切到 wezard 那个', '镜像第2个', '换到 🦊 那个会话'. First call list_claude_sessions to resolve the user's natural-language reference (emoji / directory / topic) to a concrete sessionId, then pass that sessionId here.",
+      "Re-point the WeCom mirror at a different already-running agent session, so the user's IM chat starts mirroring (and injecting into) that session instead. Call this when the user picks a session to switch to — e.g. '切到 wezard 那个', '镜像第2个', '换到 🦊 那个会话'. First call list_claude_sessions to resolve the user's natural-language reference (emoji / directory / topic) to a concrete sessionId, then pass that sessionId here.",
     inputSchema: {
       sessionId: z.string().describe("The target session's sessionId (a UUID), as returned by list_claude_sessions."),
     },

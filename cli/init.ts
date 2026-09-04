@@ -299,7 +299,7 @@ const main = async (): Promise<void> => {
     message: "选择 wrc 模式：",
     choices: [
       {
-        name: "mirror (推荐：远程消息注入到本地 tmux 里的 claude 会话，CLI 可见双向同步)",
+        name: "mirror (推荐：远程消息注入到本地 tmux 里的 Agent 会话，CLI 可见双向同步)",
         value: "mirror",
       },
       {

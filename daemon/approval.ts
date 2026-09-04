@@ -107,7 +107,7 @@ const SOURCE_ICON = "https://wwcdn.weixin.qq.com/node/wework/images/3d-claude-ai
 const buildSource = (danger?: string, sessionName?: string): TemplateCard["source"] =>
   ({
     icon_url: SOURCE_ICON,
-    desc: TRUNC(sessionName || "Claude Code", 13),
+    desc: TRUNC(sessionName || "wezard", 13),
     desc_color: danger ? 2 : 0,
   }) as TemplateCard["source"];
 
@@ -864,7 +864,7 @@ const buildPlanCard = (reqId: string, _sessionId: string, cwd: string, transcrip
     source: buildSource(undefined, tail),
     main_title: { title: TRUNC(`📋 计划审批 · ${tag}${dir}/`, PLAN_TITLE_MAX + 12) },
     sub_title_text: hasPlan
-      ? "审阅上方计划后选择:同意开始执行,或让 Claude 继续完善。"
+      ? "审阅上方计划后选择:同意开始执行,或让 Agent 继续完善。"
       : "完整计划见 CLI。选择:同意开始执行,或继续完善。",
     task_id: reqId,
     button_list: [

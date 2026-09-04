@@ -77,12 +77,12 @@ const renderIds = (msg: BaseMessage, cfg: Config): string => {
       `群: \`${chat}\` ${mark(chat)}`,
       `发送者: \`${sender}\` ${mark(sender)}`,
       `(allowFrom 任一通过即可)`,
-      `在已有claude会话中绑定本群聊: \`/wezard:wrc chat:${msg.chatid}\``,
+      `在已有 Agent 会话中绑定本群聊: \`/wezard:wrc chat:${msg.chatid}\``,
     ].join("\n");
   }
   return [
     `会话id: \`${sender}\` ${mark(sender)}`,
-    `在已有claude会话中绑定本单聊: \`/wezard:wrc user:${msg.from.userid}\``,
+    `在已有 Agent 会话中绑定本单聊: \`/wezard:wrc user:${msg.from.userid}\``,
   ].join("\n");
 };
 
@@ -173,7 +173,7 @@ const renderHelp = (): string =>
     "切换后 `/clear`、`/stop`、`--resume` 自愈都仍绑在该 CLI 上。",
     "",
     "▎多会话路由",
-    "同一聊天可同时运行多个 claude:消息中任意位置带 `#tag`(如 `#docs 帮我改 README`)",
+    "同一聊天可同时运行多个 Agent 会话:消息中任意位置带 `#tag`(如 `#docs 帮我改 README`)",
     "即路由到该标签会话;不带 tag = 默认会话。tagged 会话的回复以 `emoji #tag` 前缀标注。",
     "`/clear #tag`、`/pwd #tag`、`/stop #tag` 等命令同理按 tag 路由。",
     "`#tag` 与 CLI 名可同时写:`/new codebuddy #docs` = 用 codebuddy 开 docs 会话。",
@@ -212,7 +212,7 @@ const renderHelp = (): string =>
     "纯引用不加字：把被引用内容当正文重发 —— 微信会去重相同文本，",
     "这是重新触发同一条命令 (如 `/usage`) 的唯一方式。",
     "",
-    "其余文本直接转发给已绑定的 Claude 会话。",
+    "其余文本直接转发给已绑定的 Agent 会话。",
   ].join("\n");
 
 // /session(s) [arg] — list live Claude sessions, or switch the mirror to one.
@@ -227,7 +227,7 @@ const parseSessionsCommand = (text: string): { arg: string } | undefined => {
 // Render the scanned session list into a WeCom-friendly markdown block. The
 // session currently mirrored to this chat's target (if any) is flagged.
 const renderSessionsList = (sessions: SessionInfo[], currentSid: string): string => {
-  if (sessions.length === 0) return "[wezard] 未发现正在运行的 Claude 会话";
+  if (sessions.length === 0) return "[wezard] 未发现正在运行的 Agent 会话";
   // Only annotate the CLI when the list actually spans more than one — with a
   // single backend the tag is pure noise on every row.
   const mixed = new Set(sessions.map((s) => s.cli)).size > 1;
@@ -633,8 +633,8 @@ export const installInboundRouter = (
       let body: string;
       if (!mirror) {
         body = audit.tag
-          ? `[wezard] /audit: 未找到 tag \`${audit.tag}\` 对应的 Claude 会话。`
-          : `[wezard] /audit: 未找到 ${who} 绑定的 Claude 会话。先 \`/new\` 或用 \`wezard mirror\` 绑定后再试。`;
+          ? `[wezard] /audit: 未找到 tag \`${audit.tag}\` 对应的 Agent 会话。`
+          : `[wezard] /audit: 未找到 ${who} 绑定的 Agent 会话。先 \`/new\` 或用 \`wezard mirror\` 绑定后再试。`;
       } else {
         try {
           body = computeAuditReport({
