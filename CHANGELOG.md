@@ -2,6 +2,11 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.3.6] - 2026-09-04
+
+### Added
+- CLI/Skill: **`wezard update` 子命令 + `/wezard:update` skill —— 一键升级**。版本判定看**npm 全局副本**而非调用方副本（`npm view` 取 latest，全局已是 latest 则零操作退出；dev 检出领先 npm 时不会误判/误降级全局）→ `npm i -g wezard@latest`（postinstall 顺带 `claude plugin marketplace update` 刷新插件副本里的 hook/MCP/commands）→ **从新装目录 re-exec 收尾**（`__update-finish`，避免在已被 npm 替换的旧树上继续跑；新装副本是 < 1.3.6 旧代码时自动降级为旧副本自带的 `sync` + `reload`）。收尾按 launchd/systemd 记录的 daemon 家目录三分支：指向陈旧 npm prefix（nvm 换 node 后常见）先 HTTP 优雅停再重跑 `install.sh` 重指并顺带重启已注册的 svr；指向源码 dev 检出（`.git`/`tsconfig.json`）只 reload 不动 plist、并跳过 sync（dev 安装的 sync targets 必须继续指向 dev 仓库）；家目录缺失则提示跳过。非 dev 路径收尾统一跑 `wezard sync`（codebuddy hook 是打进本包的绝对路径，prefix 挪了必须重写）。升级后 hook 代码即时生效（每次 tool call 重新 exec），MCP server 与 commands 需重启会话，结束时打印提示。
+
 ## [1.3.5] - 2026-09-02
 
 ### Fixed
@@ -317,7 +322,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.5...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.6...HEAD
+[1.3.6]: https://github.com/guxi11/wezard/compare/v1.3.5...v1.3.6
 [1.3.5]: https://github.com/guxi11/wezard/compare/v1.3.4...v1.3.5
 [1.3.3]: https://github.com/guxi11/wezard/compare/v1.3.2...v1.3.3
 [1.3.2]: https://github.com/guxi11/wezard/compare/v1.3.1...v1.3.2

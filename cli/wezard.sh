@@ -43,6 +43,7 @@ wezard <subcommand>
   sync                   write hooks/MCP/env into sync.targets settings.json
   unsync                 remove our entries from sync.targets settings.json
   audit [tag]            token/cost breakdown for current Claude session (main + subagents)
+  update                 npm i -g wezard@latest + repoint/restart daemon + sync (one command, see /wezard:update)
   uninstall              full teardown: stop daemon + unsync + plugin uninstall + remove daemon (run before `npm uninstall -g`)
                          add `--purge` to also delete ~/.wezard state
   version                print wezard version
@@ -73,6 +74,12 @@ exec_node() {
     fi
   fi
   exec "$(command -v node)" "$script" "$@"
+}
+
+# Version straight from the package manifest — no jq dep, regex is enough.
+# Optional arg: package dir (defaults to this script's REPO_ROOT).
+pkg_version() {
+  sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${1:-$REPO_ROOT}/package.json" | head -1
 }
 
 # One launchctl vocabulary, one readiness judge. Every lifecycle command
@@ -213,6 +220,98 @@ case "$cmd" in
     if [[ "${1:-}" == "-f" ]]; then tail -f "$log_path"; else tail -n 100 "$log_path"; fi
     ;;
   config-path) http_get /status | jq -r '.sourcePath // empty' ;;
+  update)
+    # npm i -g REPLACES the package tree this script may currently be running
+    # from (plugin cache copy / dev checkout), so: install first, then re-exec
+    # the FRESH npm copy (__update-finish) for every post-install step.
+    command -v npm >/dev/null 2>&1 || { echo "[wezard] npm not on PATH" >&2; exit 1; }
+    LATEST="$(npm view wezard version 2>/dev/null || true)"
+    [[ -n "$LATEST" ]] || { echo "[wezard] cannot resolve npm latest ('npm view wezard version' failed)" >&2; exit 1; }
+    NPM_WEZARD="$(npm root -g 2>/dev/null)/wezard"
+    # Judge "already latest" by the GLOBAL copy — the thing being updated. The
+    # invoking copy may be a dev checkout ahead of npm; its version says
+    # nothing about the global install and must not gate (or downgrade) it.
+    GLOBAL_VER="none"
+    [[ -f "$NPM_WEZARD/package.json" ]] && GLOBAL_VER="$(pkg_version "$NPM_WEZARD")"
+    if [[ "$GLOBAL_VER" == "$LATEST" ]]; then
+      echo "[wezard] already latest ($LATEST)"
+      exit 0
+    fi
+    echo "[wezard] global $GLOBAL_VER → $LATEST: npm i -g wezard@latest ..."
+    npm i -g wezard@latest --no-audit --no-fund || { echo "[wezard] npm install failed" >&2; exit 1; }
+    [[ -f "$NPM_WEZARD/cli/wezard.sh" ]] \
+      || { echo "[wezard] $NPM_WEZARD/cli/wezard.sh missing after install" >&2; exit 1; }
+    # postinstall (run by npm above) refreshed the Claude plugin marketplace
+    # copy — hook/MCP/commands in ~/.claude/plugins are already on the new tag.
+    if grep -q '__update-finish' "$NPM_WEZARD/cli/wezard.sh"; then
+      exec bash "$NPM_WEZARD/cli/wezard.sh" __update-finish "$GLOBAL_VER"
+    fi
+    # Fresh copy predates `update` (< 1.3.6) — drive its own sync + reload.
+    echo "[wezard] installed copy has no __update-finish — falling back to sync + reload"
+    bash "$NPM_WEZARD/cli/wezard.sh" sync || echo "[wezard] sync failed — run 'wezard sync' manually" >&2
+    exec bash "$NPM_WEZARD/cli/wezard.sh" reload
+    ;;
+  __update-finish)
+    # Internal tail of `update` — always runs from the freshly installed npm
+    # copy, so REPO_ROOT is the new-code npm global dir.
+    OLD_VER="${1:-none}"
+    NEW_VER="$(pkg_version)"
+    echo "[wezard] installed $OLD_VER → $NEW_VER (npm global: $REPO_ROOT)"
+
+    # Where launchd/systemd actually runs the daemon from. Three cases:
+    #   missing      → daemon never installed here
+    #   dev checkout → daemon deliberately runs from source (.git/tsconfig) —
+    #                  npm update doesn't touch it; reload only, skip sync too
+    #                  (a dev setup's sync targets must keep pointing at the
+    #                  dev repo, not the npm copy)
+    #   other path   → stale npm prefix (e.g. nvm node switch) → repoint via
+    #                  install.sh; same path → plist regen + restart
+    daemon_home() {
+      case "$OS" in
+        Darwin) [[ -f "$PLIST" ]] && sed -n 's|.*<string>\(.*\)/dist/daemon/index.js</string>.*|\1|p' "$PLIST" | head -1 ;;
+        Linux)  local u="$HOME_DIR/.config/systemd/user/wezard.service"
+                [[ -f "$u" ]] && sed -n 's|^WorkingDirectory=||p' "$u" | head -1 ;;
+      esac
+    }
+    is_dev_checkout() { [[ -d "$1/.git" || -f "$1/tsconfig.json" ]]; }
+    svr_registered() {
+      case "$OS" in
+        Darwin) [[ -f "$HOME_DIR/Library/LaunchAgents/com.wezard.svr.plist" ]] ;;
+        Linux)  [[ -f "$HOME_DIR/.config/systemd/user/wezard-svr.service" ]] ;;
+      esac
+    }
+
+    HOME_NOW="$(daemon_home)"
+    if [[ -z "$HOME_NOW" ]]; then
+      echo "[wezard] daemon not installed — skipping daemon restart ('wezard init' to install)"
+    elif is_dev_checkout "$HOME_NOW"; then
+      echo "[wezard] daemon runs from source ($HOME_NOW) — npm update doesn't touch it; reloading as-is"
+      graceful_stop >/dev/null 2>&1 || true
+      ensure_up && echo "[wezard] daemon reloaded" || { echo "[wezard] daemon reload failed — 'wezard logs'" >&2; exit 1; }
+      echo "[wezard] dev install detected — skipped sync (targets stay pointed at $HOME_NOW)"
+      echo "[wezard] update done."
+      exit 0
+    else
+      [[ "$HOME_NOW" != "$REPO_ROOT" ]] \
+        && echo "[wezard] daemon points at a stale install ($HOME_NOW) — repointing via install.sh"
+      # NEVER bootout a live daemon: its SIGTERM handler awaits http.close(),
+      # which blocks forever on a hung long-poll and wedges launchctl. Die via
+      # HTTP first so install.sh's bootout finds a corpse, instant and clean.
+      graceful_stop >/dev/null 2>&1 || true
+      bash "$REPO_ROOT/scripts/install.sh" daemon || { echo "[wezard] install.sh daemon failed" >&2; exit 1; }
+      svr_registered && { bash "$REPO_ROOT/scripts/install.sh" svr || echo "[wezard] install.sh svr failed" >&2; }
+      wait_up && echo "[wezard] daemon running $NEW_VER" || echo "[wezard] daemon not responding — 'wezard logs'" >&2
+    fi
+
+    # Refresh hook/MCP/env entries in sync.targets. The codebuddy hook is an
+    # ABSOLUTE path into this package — mandatory rewrite when the npm prefix
+    # moved; idempotent no-op otherwise.
+    if [[ -f "$REPO_ROOT/dist/cli/sync.js" ]]; then
+      "$(command -v node)" "$REPO_ROOT/dist/cli/sync.js" \
+        || echo "[wezard] sync failed — run 'wezard sync' manually" >&2
+    fi
+    echo "[wezard] update done. Hook code refreshes per tool call; restart running sessions to pick up the new MCP server & commands."
+    ;;
   uninstall)
     # Order matters: stop the daemon FIRST so it can't rewrite settings/lock
     # files mid-teardown; then strip MCP/env from agent settings; then remove
@@ -318,10 +417,8 @@ case "$cmd" in
     ;;
   help|-h|--help) usage ;;
   version|-v|--version)
-    # Read version straight from the package manifest — no jq dep, regex is enough.
-    pkg="$REPO_ROOT/package.json"
-    [[ -f "$pkg" ]] || { echo "package.json not found at $pkg" >&2; exit 1; }
-    sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$pkg" | head -1
+    [[ -f "$REPO_ROOT/package.json" ]] || { echo "package.json not found at $REPO_ROOT/package.json" >&2; exit 1; }
+    pkg_version
     ;;
   *) echo "unknown subcommand: $cmd"; usage; exit 2 ;;
 esac
