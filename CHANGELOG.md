@@ -2,6 +2,11 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Fixed
+- `approval`: **子代理工具调用的审批归属修正 —— 与主会话同一套判定链**。CC/CodeBuddy 通常把子代理 hook 的 `session_id` 上报成父会话 id, 子代理工具调用因此天然被 `danger.skipAll` / 卡片 / ⏱窗口 / 缓存覆盖; 但部分 CC 版本 / IDE 集成会上报子代理**自己**的 session, 该 id 无镜像绑定时请求会落到 `ask` 兜底 —— 镜像 pane 里变成远程无人可点的原生确认框 (卡住、不下发卡片, 看似「不受 skipAll 控制」)。现在 hook 把 CC 的 `agent_id` / `agent_type` 透传给 daemon, daemon 在 mirror 模式下对「session_id 未绑定 + transcript_path 含 `/subagents/` 或落在父会话转录」的请求按 transcript 反推父会话并路由过去, 审批链 (skipAll/卡片/窗口/缓存/规则) 与主会话完全一致。
+
 ## [1.3.6] - 2026-09-04
 
 ### Added

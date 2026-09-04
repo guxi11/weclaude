@@ -68,6 +68,12 @@ TOOL_INPUT=$(printf '%s' "$PAYLOAD" | jq -c '.tool_input // {}')
 CWD=$(printf '%s' "$PAYLOAD" | jq -r '.cwd // ""')
 TRANSCRIPT_PATH=$(printf '%s' "$PAYLOAD" | jq -r '.transcript_path // ""')
 PERMISSION_MODE=$(printf '%s' "$PAYLOAD" | jq -r '.permission_mode // ""')
+# CC/CodeBuddy 在子代理内部触发 hook 时会带上这两个字段 (agent_id/agent_type)。
+# 透传给 daemon: 部分 CC 版本把子代理自己的 session 上报成 session_id, daemon 靠
+# 这两个标记 + transcript_path 把请求对回父会话, 让审批链 (skipAll/卡片/窗口)
+# 与主会话一致, 而不是落到无人可点的 ask 兜底。
+AGENT_ID=$(printf '%s' "$PAYLOAD" | jq -r '.agent_id // empty')
+AGENT_TYPE=$(printf '%s' "$PAYLOAD" | jq -r '.agent_type // empty')
 
 # CLI 后端: 与下方 ExitPlanMode 同款判别 — transcript 落在 ~/.codebuddy/ 即
 # codebuddy。daemon 的 AskUserQuestion 分支据此走去重逻辑 (codebuddy 的 hook
@@ -174,8 +180,12 @@ build_body() {
     --arg tp "$TRANSCRIPT_PATH" \
     --arg cb "$CLI_BACKEND" \
     --arg rid "$RESUME_ID" \
+    --arg aid "$AGENT_ID" \
+    --arg aty "$AGENT_TYPE" \
     '{session_id:$sid,tool_name:$tn,tool_input:$ti,cwd:$cwd,transcript_tail:$tail,transcript_path:$tp,cli_backend:$cb}
-     + (if $rid == "" then {} else {resume_req_id:$rid} end)'
+     + (if $rid == "" then {} else {resume_req_id:$rid} end)
+     + (if $aid == "" then {} else {agent_id:$aid} end)
+     + (if $aty == "" then {} else {agent_type:$aty} end)'
 }
 
 # drain 到进程真正退出之间还有 ~200ms。不等它先死就重投, 会打进这个将死的进程,

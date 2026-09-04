@@ -1498,6 +1498,10 @@ interface ApproveReq {
   /** Reload 续接: 上一轮长轮询被 drain 时 daemon 回传的 req_id。带着它重来 =
    *  「别再发一张卡, 把我重新挂到旧卡的那个 reqId 上」。 */
   resume_req_id?: string;
+  /** CC/CodeBuddy 子代理内部触发 hook 时带的身份标记 (pre-tool-use.sh 原样透传)。
+   *  用于把「session_id 上报成子代理自己」的请求对回父会话 (见 subagentParentOf)。 */
+  agent_id?: string;
+  agent_type?: string;
 }
 
 interface ApproveResp {
@@ -1559,6 +1563,30 @@ const resolveApprover = (
 ): string | undefined => {
   const mirror = sessionId ? getMirrorTarget?.(sessionId) : undefined;
   return mirror || pickApprover(cfg);
+};
+
+// ── Subagent 归属解析 ──────────────────────────────────────────────────
+// CC / CodeBuddy 正常把子代理工具调用的 hook session_id 上报成**父会话** id
+// (实测 CodeBuddy general-purpose/fork/background 与 CC headless 都是), 审批链
+// 因此天然覆盖子代理 —— skipAll / 卡片 / ⏱窗口 / 缓存全与主会话一致。
+// 但部分 CC 版本 / IDE 集成会把子代理**自己**的 session 上报成 session_id,
+// 只剩 transcript_path + agent 标记能对回父会话。session_id 无镜像绑定时, 按
+// transcript_path 反推父会话并路由过去 —— 否则这类请求落到 ask 兜底, 在镜像
+// pane 里变成远程无人可点的原生确认框 (卡住、无卡片), skipAll/卡片全部失联。
+const subagentParentOf = (
+  transcriptPath: string,
+  agentId: string,
+  agentType: string,
+): string | undefined => {
+  if (!transcriptPath || (!agentId && !agentType)) return undefined;
+  const norm = transcriptPath.replace(/\\/g, "/");
+  // `<projectDir>/<encodedCwd>/<parentSid>/subagents/agent-*.jsonl` — 父在上一级
+  const sub = norm.match(/\/([^/]+)\/subagents\/agent-[^/]+\.jsonl$/);
+  if (sub) return sub[1];
+  // 直接落在 `<projectDir>/<uuid>.jsonl` 的主转录布局 (CC 子代理 hook 给的是父转录)
+  const main = norm.match(/\/([0-9a-fA-F-]{36})\.jsonl$/);
+  if (main) return main[1];
+  return undefined;
 };
 
 export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarget, flushBeforeCard, nativeModal }: ApprovalDeps): Handler => {
@@ -1739,7 +1767,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     }
 
     const body = (await readBody(req)) as Partial<ApproveReq>;
-    const sessionId = body.session_id ?? "";
+    let sessionId = body.session_id ?? "";
     const toolName = body.tool_name ?? "";
     const toolInput = body.tool_input ?? {};
     const cwd = body.cwd ?? "";
@@ -1748,6 +1776,20 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     if (!toolName) {
       json(res, 400, { decision: "ask", reason: "missing_tool_name" } satisfies ApproveResp);
       return;
+    }
+
+    // 子代理请求归属修正 (见 subagentParentOf): 只有 mirror 模式下、session_id 本身
+    // 没绑到任何会话、而 transcript 能反推出已绑定的父会话时才改写 —— 主会话/已绑定
+    // 子代理请求 (CC/CodeBuddy 都上报父 id) 完全不受影响。
+    if (sessionId && cfg.wrc.mode === "mirror" && getMirrorTarget && !getMirrorTarget(sessionId)) {
+      const parent = subagentParentOf(body.transcript_path ?? "", body.agent_id ?? "", body.agent_type ?? "");
+      if (parent && parent !== sessionId && getMirrorTarget(parent)) {
+        log.info(
+          { sessionId, parent, agentType: body.agent_type ?? "", toolName },
+          "subagent call re-routed to parent session",
+        );
+        sessionId = parent;
+      }
     }
 
     // Matcher: only intercept matching tools — others pass.
