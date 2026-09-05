@@ -325,6 +325,58 @@ export const transcriptStalled = (jsonlPath: string): boolean => {
   return false;
 };
 
+// ── Rate-limit park detection ─────────────────────────────────────────
+// When a turn dies on quota, CC writes a synthetic assistant line carrying the
+// authoritative reset moment: `quotaLimits.resetsAt` (epoch sec). Injecting
+// anything before that moment only buys another 429 line, so auto-resume keys
+// off this timestamp instead of blind retries. "Parked" means the limit line is
+// the transcript's LAST message turn — any later user/assistant turn (a human
+// retry, an approval resume, our own inject) clears the state with zero
+// bookkeeping, which is what lets the whole feature stay poll-derived.
+const LIMIT_TEXT_RE = /hit your (session|usage|weekly)?\s*limit|usage limit reached/i;
+
+// Older CC renders only prose ("resets 2:30am (Asia/Shanghai)") — recover the
+// next local-clock occurrence. The TUI prints in the machine's own timezone,
+// so local Date math is the right interpretation.
+const parseResetClock = (text: string, now: number): number | undefined => {
+  const m = /resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i.exec(text);
+  if (!m) return undefined;
+  let h = Number(m[1]) % 12;
+  if ((m[3] ?? "").toLowerCase() === "pm") h += 12;
+  const d = new Date(now);
+  d.setHours(h, Number(m[2] ?? 0), 0, 0);
+  return d.getTime() <= now ? d.getTime() + 86_400_000 : d.getTime();
+};
+
+/** Epoch ms when a limit-parked session becomes retryable, or undefined when
+ *  the transcript is not currently parked on a rate-limit line (or the line
+ *  carries no recoverable reset time). Gated on `isApiErrorMessage` — only CC
+ *  synthetic error lines qualify, prose merely *discussing* limits cannot. */
+export const limitResetAt = (jsonlPath: string, now = Date.now()): number | undefined => {
+  const raw = readTail(jsonlPath);
+  if (!raw) return undefined;
+  const normalize = backendForPath(jsonlPath).normalizeTranscriptLine;
+  let last: number | undefined; // reset ms of the newest turn IF it's a limit line
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    let parsed: unknown;
+    try { parsed = JSON.parse(line); } catch { continue; }
+    let row;
+    try { row = normalize(parsed); } catch { continue; }
+    if (!row || row.isMeta || row.isSidechain) continue;
+    const role = row.message?.role;
+    if (role !== "user" && role !== "assistant") continue;
+    const p = parsed as { isApiErrorMessage?: boolean; error?: string; quotaLimits?: { resetsAt?: number } };
+    const text = blockText(row.message?.content);
+    const isLimit = role === "assistant" && p.isApiErrorMessage === true &&
+      (p.error === "rate_limit" || typeof p.quotaLimits?.resetsAt === "number" || LIMIT_TEXT_RE.test(text));
+    if (!isLimit) { last = undefined; continue; }
+    const sec = p.quotaLimits?.resetsAt;
+    last = typeof sec === "number" ? (sec > 1e12 ? sec : sec * 1000) : parseResetClock(text, now);
+  }
+  return last;
+};
+
 /** Trim a captured pane to its last `rows` non-blank lines — the TUI pads the
  *  viewport with empties that would otherwise dominate a WeCom bubble. */
 export const compactPane = (paneText: string, rows = 24): string =>

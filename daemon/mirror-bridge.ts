@@ -38,7 +38,7 @@ import { labelFor, tagOfKey, baseOfKey, keyOf, withTagHeader } from "../shared/s
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { randomTip } from "./tips.js";
 import { chatBaseOf, chatNameOf, listChatNames, normChatName, parsePeerRef, peerAddress } from "./chat-name.js";
-import { stripAnsi, compactPane, paneIsBusy, paneIsStalled, transcriptStalled, summarizeTail, lastAssistantText, lastContextTokens, keepaliveStamps, tailTurns, renderDialog, type PeerInfo } from "./peers.js";
+import { stripAnsi, compactPane, paneIsBusy, paneIsStalled, transcriptStalled, limitResetAt, summarizeTail, lastAssistantText, lastContextTokens, keepaliveStamps, tailTurns, renderDialog, type PeerInfo } from "./peers.js";
 
 // Same PATH augmentation logic as cc-bridge: launchd / systemd start the daemon
 // with a stripped PATH that often lacks nvm / homebrew, breaking spawn(claudeBin).
@@ -1903,6 +1903,13 @@ interface AttachState {
   /** Fail-safe timer for keepaliveByContent — a reply that never emits
    *  turn_end (crash/hang) must not mute a later real turn forever. */
   keepaliveContentTimer?: NodeJS.Timeout;
+  /** Rate-limit auto-resume episode, keyed by the limit line's resetsAt. Set
+   *  while the transcript is parked on a 429 line; cleared the moment any
+   *  newer turn appears (limitResetAt re-derives from the tail each tick).
+   *  `notified` dedupes the WeCom heads-up; `retried` caps injection at one
+   *  attempt per episode — a retry that hits the wall again produces a NEW
+   *  limit line with a fresh resetsAt, which starts a fresh episode. */
+  limitResume?: { resetsAt: number; notified: boolean; retried: boolean };
 }
 
 // Mirror outbound state machine. See plan: defer stream open by N ms; flush
@@ -4388,8 +4395,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // Stall recovery, decided by RULE only (no model self-judgment): the last
         // transcript turn is a synthetic API-error/limit line, or the idle pane
         // still shows an error banner ⇒ a turn died mid-work. Send the resume
-        // instruction instead of the plain warmer.
-        const stalled = kc.resumeOnStall && (transcriptStalled(a.jsonlPath) || paneIsStalled(paneTail));
+        // instruction instead of the plain warmer. A limit-parked episode is
+        // excluded: retrying before resetsAt only buys another 429 line —
+        // limitResumeTick owns that recovery, anchored on the reset moment.
+        const stalled = kc.resumeOnStall && !a.limitResume && (transcriptStalled(a.jsonlPath) || paneIsStalled(paneTail));
         k.pinging = true;
         k.pingMtime = k.lastMs;                                // settles when a newer turn (the ping's own) appears
         await fireKeepalive(a, stalled);
@@ -4401,6 +4410,72 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     }
   };
   const keepaliveTimer = setInterval(() => void keepaliveTick(), 15_000);
+
+  // ── Rate-limit auto-resume ────────────────────────────────────────────
+  // Detection is poll-derived from the transcript tail every tick (limitResetAt:
+  // "last message turn IS a 429 line"), so there is nothing to persist — a
+  // daemon reload, a human retry in the TTY, or our own inject all converge
+  // naturally: any newer turn makes detection stop firing and drops the state.
+  const fmtClock = (ms: number): string => {
+    const d = new Date(ms);
+    return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  };
+
+  let limitResumeTicking = false;
+  const limitResumeTick = async (): Promise<void> => {
+    const lr = cfg.wrc.mirror.limitResume;
+    if (!lr.enabled || limitResumeTicking) return;
+    limitResumeTicking = true;
+    try {
+      const now = Date.now();
+      for (const a of byTarget.values()) {
+        const resetsAt = limitResetAt(a.jsonlPath, now);
+        if (!resetsAt) { a.limitResume = undefined; continue; }
+        if (a.migrationWatcher) continue;                    // session rotating — judge after it settles
+        if (a.keepaliveOff) continue;                        // /stop = deliberately quieted; honor it
+        if (a.limitResume?.resetsAt !== resetsAt) a.limitResume = { resetsAt, notified: false, retried: false };
+        const st = a.limitResume;
+        const dueAt = resetsAt + lr.delaySec * 1000;
+        if (!st.notified) {
+          st.notified = true;
+          log.info({ target: a.target, resetsAt, dueAt }, "limit-resume: parked, retry scheduled");
+          sendStandalone(a, `[mirror] ⏳ 已触限额 (reset ${fmtClock(resetsAt)}) — ${fmtClock(dueAt)} 自动注入 \`${lr.text}\` 续跑`);
+        }
+        if (st.retried || now < dueAt) continue;
+        if (a.liveStream && !a.liveStream.closed) continue;  // mid typewriter — don't inject
+        if (a.tmuxPane) {
+          // Pane mode: a dead pane means the human closed shop — auto-respawning
+          // a TUI at 3am would be a surprise, not a service. Busy means someone
+          // (human, or another turn) is already driving; detection clears itself
+          // once their turn lands. Spawn-mode has no pane and no such hazards —
+          // inject's `claude --resume -p` fallback IS its normal operation.
+          if (!(await tmuxPaneAlive(a.tmuxPane))) continue;
+          if (paneIsBusy(await capturePaneTail(a.tmuxPane, 16))) continue;
+        }
+        st.retried = true;
+        // Unlike keepalive there is no swallow: the resumed work is real work —
+        // the tail mirrors its output to chat normally. rememberInject only
+        // suppresses the echo of the injected user line itself.
+        rememberInject(lr.text);
+        const r = await inject({
+          text: lr.text, images: [], cfg,
+          log: log.child({ target: a.target, sessionId: a.sessionId, sub: "limit-resume" }),
+          sessionId: a.sessionId, jsonlPath: a.jsonlPath, tmuxTarget: a.tmuxPane,
+        });
+        if (!r.ok) {
+          st.retried = false; // roll back so the next tick retries the inject
+          log.warn({ target: a.target, reason: r.reason }, "limit-resume: inject failed");
+          continue;
+        }
+        log.info({ target: a.target, resetsAt }, "limit-resume: resume injected");
+      }
+    } catch (e) {
+      log.warn({ err: (e as Error).message }, "limit-resume tick failed");
+    } finally {
+      limitResumeTicking = false;
+    }
+  };
+  const limitResumeTimer = setInterval(() => void limitResumeTick(), 30_000);
 
   return {
     attach,
@@ -4748,6 +4823,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     shutdown: () => {
       clearInterval(paneDriftTimer);
       clearInterval(keepaliveTimer);
+      clearInterval(limitResumeTimer);
       for (const a of bySessionId.values()) {
         if (a.outbound?.kind === "deferred") clearTimeout(a.outbound.timer);
         a.outbound = undefined;

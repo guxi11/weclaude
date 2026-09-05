@@ -148,6 +148,21 @@ const Mirror = z.object({
       resumePing: z.string().default('continue'),
     })
     .default({}),
+  // ── Rate-limit auto-resume ────────────────────────────────────────────
+  // 触顶时 CC 在 transcript 写入 synthetic 限额行, 自带恢复时刻
+  // (quotaLimits.resetsAt, epoch 秒)。reset 之前注入任何文本都只会再撞一条
+  // 429, 所以恢复以 resetsAt 为锚: 过点再等 delaySec 后, 向所有仍停在限额行
+  // 上的会话注入 text 续跑。检测纯规则 (transcript 末轮 = 限额行), 每轮轮询
+  // 重新推导, 无持久化 — daemon reload 后自愈。
+  limitResume: z
+    .object({
+      enabled: z.boolean().default(true),
+      // reset 过点后的缓冲秒数 — 服务端 reset 生效有抖动, 卡点重试可能再吃 429。
+      delaySec: z.number().int().nonnegative().default(60),
+      // 注入的续跑指令。
+      text: z.string().default("continue"),
+    })
+    .default({}),
 });
 
 const Wrc = z.object({

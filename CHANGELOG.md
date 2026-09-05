@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+### Added
+- `mirror`: **触限额会话自动续跑** (`wrc.mirror.limitResume`, 默认开)。CC 触顶时写入 transcript 的 synthetic 限额行自带恢复时刻 (`quotaLimits.resetsAt`, epoch 秒; 旧版无此字段时从 "resets 2:30am" 文案按本机时区解析)。daemon 每 30s 轮询各 attachment: transcript 末轮是限额行 ⇒ 群里通知一次预定续跑时间, 到点 (reset + `delaySec`, 默认 60s) 后向仍停着的会话注入 `text` (默认 `continue`) 续跑。检测纯规则、逐轮从 tail 重推导, 无持久化 —— reload、人工亲自续跑、注入本身都靠「限额行不再是末轮」自然收敛; 再撞 429 会生成带新 resetsAt 的新限额行, 自动开启下一轮排定。pane 已死 (人收摊了)、正忙、`/stop` 静默中的会话不打扰。同时 keepalive 的 stall-resume 对已排定限额恢复的会话不再抢跑 —— reset 前注入只会再吃一条 429。
+
 ### Fixed
 - `approval`: **子代理工具调用的审批归属修正 —— 与主会话同一套判定链**。CC/CodeBuddy 通常把子代理 hook 的 `session_id` 上报成父会话 id, 子代理工具调用因此天然被 `danger.skipAll` / 卡片 / ⏱窗口 / 缓存覆盖; 但部分 CC 版本 / IDE 集成会上报子代理**自己**的 session, 该 id 无镜像绑定时请求会落到 `ask` 兜底 —— 镜像 pane 里变成远程无人可点的原生确认框 (卡住、不下发卡片, 看似「不受 skipAll 控制」)。现在 hook 把 CC 的 `agent_id` / `agent_type` 透传给 daemon, daemon 在 mirror 模式下对「session_id 未绑定 + transcript_path 含 `/subagents/` 或落在父会话转录」的请求按 transcript 反推父会话并路由过去, 审批链 (skipAll/卡片/窗口/缓存/规则) 与主会话完全一致。
 
